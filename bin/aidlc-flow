@@ -1,16 +1,65 @@
 #!/bin/sh
 set -eu
 
+self_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+root=$(CDPATH= cd -- "$self_dir/.." && pwd)
+. "$root/lib/common.sh"
+
 usage() {
   printf '%s\n' 'Usage: aidlc-flow init --harness codex|claude [--project-dir PATH]' >&2
 }
 
-if [ "$#" -eq 0 ]; then
-  usage
-  exit 2
-fi
+[ "$#" -gt 0 ] || { usage; exit 2; }
+command_name=$1
+shift
+[ "$command_name" = init ] || { usage; exit 2; }
 
-case "$1" in
-  init) exit 0 ;;
+harness=
+project_dir=$PWD
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --harness)
+      [ "$#" -ge 2 ] || { usage; exit 2; }
+      harness=$2
+      shift 2
+      ;;
+    --project-dir)
+      [ "$#" -ge 2 ] || { usage; exit 2; }
+      project_dir=$2
+      shift 2
+      ;;
+    *) usage; exit 2 ;;
+  esac
+done
+
+case "$harness" in
+  codex|claude) ;;
   *) usage; exit 2 ;;
 esac
+
+project_dir=$(CDPATH= cd -- "$project_dir" 2>/dev/null && pwd -P) || die 2 "project directory does not exist"
+require_git_repo "$project_dir"
+require_aidlc
+refuse_base_path_symlinks "$project_dir"
+space=$(active_space "$project_dir")
+refuse_managed_path_symlinks "$project_dir" "$space"
+refuse_active_workflow "$project_dir"
+refuse_dirty_managed_memory "$project_dir" "$space" "$root/memory/team.md" "$root/memory/phases/construction.md"
+
+dirty=$(git -C "$project_dir" status --short)
+if [ -n "$dirty" ]; then
+  printf '%s\n' 'aidlc-flow: existing working-tree changes detected; review after configuration:' >&2
+  printf '%s\n' "$dirty" >&2
+fi
+
+. "$root/lib/$harness.sh"
+configure_harness "$project_dir"
+refuse_base_path_symlinks "$project_dir"
+space=$(active_space "$project_dir")
+refuse_managed_path_symlinks "$project_dir" "$space"
+memory_root="$project_dir/aidlc/spaces/$space/memory"
+merge_managed_block "$memory_root/team.md" "$root/memory/team.md" team || die 1 "failed to update managed memory: $memory_root/team.md"
+merge_managed_block "$memory_root/phases/construction.md" "$root/memory/phases/construction.md" construction || die 1 "failed to update managed memory: $memory_root/phases/construction.md"
+aidlc doctor --project-dir "$project_dir" --quiet
+printf 'aidlc-flow: configured %s for %s\n' "$harness" "$project_dir"
+print_start_hint

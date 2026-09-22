@@ -35,6 +35,34 @@ active_space() {
   printf '%s\n' "$aidlc_flow_space_value"
 }
 
+refuse_base_path_symlinks() {
+  aidlc_flow_symlink_project_dir=$1
+  for aidlc_flow_symlink_relative in \
+    aidlc \
+    aidlc/active-space \
+    aidlc/spaces
+  do
+    [ ! -L "$aidlc_flow_symlink_project_dir/$aidlc_flow_symlink_relative" ] ||
+      die 1 "symbolic link is not allowed in managed path: $aidlc_flow_symlink_project_dir/$aidlc_flow_symlink_relative"
+  done
+}
+
+refuse_managed_path_symlinks() {
+  aidlc_flow_symlink_project_dir=$1
+  aidlc_flow_symlink_space=$2
+  refuse_base_path_symlinks "$aidlc_flow_symlink_project_dir"
+  for aidlc_flow_symlink_relative in \
+    "aidlc/spaces/$aidlc_flow_symlink_space" \
+    "aidlc/spaces/$aidlc_flow_symlink_space/memory" \
+    "aidlc/spaces/$aidlc_flow_symlink_space/memory/phases" \
+    "aidlc/spaces/$aidlc_flow_symlink_space/memory/team.md" \
+    "aidlc/spaces/$aidlc_flow_symlink_space/memory/phases/construction.md"
+  do
+    [ ! -L "$aidlc_flow_symlink_project_dir/$aidlc_flow_symlink_relative" ] ||
+      die 1 "symbolic link is not allowed in managed path: $aidlc_flow_symlink_project_dir/$aidlc_flow_symlink_relative"
+  done
+}
+
 refuse_active_workflow() {
   aidlc_flow_workflow_project_dir=$1
   aidlc_flow_workflow_intents="$aidlc_flow_workflow_project_dir/aidlc/spaces"
@@ -48,6 +76,57 @@ refuse_active_workflow() {
       *) die 1 "unable to inspect AI-DLC workflow status: $aidlc_flow_workflow_intents" ;;
     esac
   fi
+}
+
+refuse_dirty_managed_memory() {
+  aidlc_flow_dirty_project_dir=$1
+  aidlc_flow_dirty_space=$2
+  aidlc_flow_dirty_team_source=$3
+  aidlc_flow_dirty_construction_source=$4
+  aidlc_flow_dirty_team="aidlc/spaces/$aidlc_flow_dirty_space/memory/team.md"
+  aidlc_flow_dirty_construction="aidlc/spaces/$aidlc_flow_dirty_space/memory/phases/construction.md"
+  if aidlc_flow_dirty_team_status=$(git -C "$aidlc_flow_dirty_project_dir" status --ignored --porcelain --untracked-files=all -- "$aidlc_flow_dirty_team"); then
+    :
+  else
+    die 1 "unable to inspect managed memory status"
+  fi
+  if aidlc_flow_dirty_construction_status=$(git -C "$aidlc_flow_dirty_project_dir" status --ignored --porcelain --untracked-files=all -- "$aidlc_flow_dirty_construction"); then
+    :
+  else
+    die 1 "unable to inspect managed memory status"
+  fi
+  if [ -z "$aidlc_flow_dirty_team_status" ] && [ -z "$aidlc_flow_dirty_construction_status" ]; then
+    return 0
+  fi
+
+  aidlc_flow_dirty_tmp=$(mktemp -d "${TMPDIR:-/tmp}/aidlc-flow-memory-check.XXXXXX") ||
+    die 1 "unable to create managed memory comparison"
+  aidlc_flow_dirty_safe=true
+  if [ -n "$aidlc_flow_dirty_team_status" ]; then
+    aidlc_flow_dirty_team_path="$aidlc_flow_dirty_project_dir/$aidlc_flow_dirty_team"
+    if [ -f "$aidlc_flow_dirty_team_path" ] &&
+      cp "$aidlc_flow_dirty_team_path" "$aidlc_flow_dirty_tmp/team.md" &&
+      merge_managed_block "$aidlc_flow_dirty_tmp/team.md" "$aidlc_flow_dirty_team_source" team &&
+      cmp -s "$aidlc_flow_dirty_team_path" "$aidlc_flow_dirty_tmp/team.md"; then
+      :
+    else
+      aidlc_flow_dirty_safe=false
+    fi
+  fi
+  if [ -n "$aidlc_flow_dirty_construction_status" ]; then
+    aidlc_flow_dirty_construction_path="$aidlc_flow_dirty_project_dir/$aidlc_flow_dirty_construction"
+    if [ -f "$aidlc_flow_dirty_construction_path" ] &&
+      cp "$aidlc_flow_dirty_construction_path" "$aidlc_flow_dirty_tmp/construction.md" &&
+      merge_managed_block "$aidlc_flow_dirty_tmp/construction.md" "$aidlc_flow_dirty_construction_source" construction &&
+      cmp -s "$aidlc_flow_dirty_construction_path" "$aidlc_flow_dirty_tmp/construction.md"; then
+      :
+    else
+      aidlc_flow_dirty_safe=false
+    fi
+  fi
+  rm -rf "$aidlc_flow_dirty_tmp" || die 1 "unable to clean managed memory comparison"
+  [ "$aidlc_flow_dirty_safe" = true ] ||
+    die 1 "managed memory has uncommitted changes; commit or stash it before configuration"
 }
 
 merge_managed_block() {
