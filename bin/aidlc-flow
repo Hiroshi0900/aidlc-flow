@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+usage() {
+  printf '%s\n' 'Usage: aidlc-flow init --harness codex|claude [--project-dir PATH]' >&2
+}
+
+if [ "$#" -eq 0 ]; then
+  usage
+  exit 2
+fi
+
+case "$1" in
+  init) exit 0 ;;
+  *) usage; exit 2 ;;
+esac
