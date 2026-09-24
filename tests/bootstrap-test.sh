@@ -44,7 +44,7 @@ case "$fake_command" in
     fake_status=${AIDLC_FAKE_CONFIG_STATUS:-0}
     [ "$fake_status" -eq 0 ] || exit "$fake_status"
     fake_space=${AIDLC_FAKE_SPACE:-default}
-    mkdir -p "$fake_project/aidlc/spaces/$fake_space"
+    mkdir -p "$fake_project/.claude" "$fake_project/aidlc/spaces/$fake_space"
     printf '%s\n' "$fake_space" > "$fake_project/aidlc/active-space"
     if [ -n "${AIDLC_FAKE_MEMORY_SYMLINK:-}" ]; then
       ln -s "$AIDLC_FAKE_MEMORY_SYMLINK" "$fake_project/aidlc/spaces/$fake_space/memory"
@@ -55,6 +55,9 @@ case "$fake_command" in
       [ -e "$fake_project/aidlc/spaces/$fake_space/memory/phases/construction.md" ] ||
         printf '%s\n' 'official construction seed' > "$fake_project/aidlc/spaces/$fake_space/memory/phases/construction.md"
     fi
+    cat > "$fake_project/.claude/settings.json" <<'JSON'
+{"env":{"AWS_AIDLC_DEFAULT_SCOPE":"classic","CLAUDE_CODE_USE_BEDROCK":"1","AWS_REGION":"us-east-1","ANTHROPIC_DEFAULT_OPUS_MODEL":"global.anthropic.claude-opus-4-8[1m]"}}
+JSON
     ;;
   doctor)
     fake_status=${AIDLC_FAKE_DOCTOR_STATUS:-0}
@@ -154,6 +157,7 @@ rm "$project/local-note.txt"
 : > "$AIDLC_FAKE_LOG"
 output=$(AIDLC_PROJECT_DIR="$decoy" CLAUDE_PROJECT_DIR="$decoy" PATH="$fake_bin:$PATH" "$root/bin/aidlc-flow" init --harness claude --project-dir "$project")
 assert_eq "$(cat "$AIDLC_FAKE_LOG")" "$project|config --project-dir $project --harness claude --mcp none --quiet
+$project|config providers --project-dir $project --provider other --acknowledge --yes
 $caller_dir|doctor --project-dir $project --quiet" "claude config and doctor are called in order"
 assert_contains "$output" "aidlc-flow: configured claude for $project" "claude completion is printed"
 assert_contains "$output" "invoke /aidlc <your idea>" "claude start hint is printed"
@@ -285,6 +289,7 @@ git -C "$alternate_project" init -q
 : > "$AIDLC_FAKE_LOG"
 output=$(AIDLC_FAKE_SPACE=alternate PATH="$fake_bin:$PATH" "$root/bin/aidlc-flow" init --harness claude --project-dir "$alternate_project")
 assert_eq "$(cat "$AIDLC_FAKE_LOG")" "$alternate_project|config --project-dir $alternate_project --harness claude --mcp none --quiet
+$alternate_project|config providers --project-dir $alternate_project --provider other --acknowledge --yes
 $caller_dir|doctor --project-dir $alternate_project --quiet" "alternate active space preserves config then doctor order"
 assert_contains "$(cat "$alternate_project/aidlc/spaces/alternate/memory/team.md")" "commit SHA" "team memory is merged into the configured active space"
 assert_contains "$(cat "$alternate_project/aidlc/spaces/alternate/memory/phases/construction.md")" "RED" "construction memory is merged into the configured active space"

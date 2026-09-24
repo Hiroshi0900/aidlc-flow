@@ -30,6 +30,8 @@ aidlc-flow init --harness claude
 
 Codexではhook trustを承認してから`$aidlc <idea>`、Claude Codeではproject hooksを承認してから`/aidlc <idea>`を実行します。
 
+Claude Code向け初期化は、公式AI-DLCが生成するAmazon Bedrock用の環境変数を除去し、既存のClaudeサブスクリプションまたはログイン済みfirst-party認証を維持します。
+
 ## Safety
 
 - 既存の未コミット変更は削除、stash、commitしません。
