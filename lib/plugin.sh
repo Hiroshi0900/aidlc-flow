@@ -329,6 +329,124 @@ else:
 PY
 }
 
+flow_plugin_selection_plan() {
+  aidlc_flow_selection_project=$1
+  aidlc_flow_selection_harness=$2
+  aidlc_flow_selection_status=$3
+  aidlc_flow_selection_plan=$4
+  python3 - "$aidlc_flow_selection_project/.$aidlc_flow_selection_harness/tools/data/harness.json" \
+    "$aidlc_flow_selection_status" "$aidlc_flow_selection_plan" <<'PY'
+import json
+import os
+import re
+import sys
+
+harness_path, status_path, plan_path = sys.argv[1:]
+safe_name = re.compile(r"^[a-z][a-z0-9-]*$")
+try:
+    with open(harness_path, encoding="utf-8") as source:
+        harness = json.load(source)
+    with open(status_path, encoding="utf-8") as source:
+        status = json.load(source)
+except (OSError, ValueError) as error:
+    raise SystemExit(f"unable to read canonical plugin state: {error}")
+if not isinstance(harness, dict):
+    raise SystemExit("harness.json must be an object")
+data = status.get("data") if isinstance(status, dict) else None
+statuses = data.get("statuses") if isinstance(data, dict) else None
+if not isinstance(status, dict) or status.get("schemaVersion") != 1 or status.get("ok") is not True or not isinstance(statuses, list):
+    raise SystemExit("plugin list returned an invalid status document")
+for row in statuses:
+    if not isinstance(row, dict):
+        raise SystemExit("plugin list returned an invalid status row")
+    key = row.get("key")
+    if key is not None and (not isinstance(key, str) or not safe_name.fullmatch(key)):
+        raise SystemExit("plugin list returned an unsafe plugin name")
+
+if "plugins" not in harness:
+    plan = {"mode": "implicit", "names": []}
+else:
+    selected = harness["plugins"]
+    if not isinstance(selected, list) or not all(isinstance(name, str) for name in selected):
+        raise SystemExit("explicit plugin selection must be an array of names")
+    if any(not safe_name.fullmatch(name) for name in selected):
+        raise SystemExit("explicit plugin selection contains an unsafe name")
+    if len(selected) != len(set(selected)):
+        raise SystemExit("explicit plugin selection contains a duplicate name")
+    names = list(selected)
+    for required in ("aidlc", "flow"):
+        if required not in names:
+            names.append(required)
+    plan = {"mode": "explicit", "names": names}
+
+temporary = plan_path + ".tmp"
+with open(temporary, "w", encoding="utf-8") as destination:
+    json.dump(plan, destination, separators=(",", ":"))
+    destination.write("\n")
+os.replace(temporary, plan_path)
+PY
+}
+
+apply_flow_plugin_selection() {
+  aidlc_flow_apply_plan=$1
+  aidlc_flow_apply_mode=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["mode"])' \
+    "$aidlc_flow_apply_plan") || return
+  [ "$aidlc_flow_apply_mode" = explicit ] || return 0
+  python3 - "$aidlc_flow_apply_plan" <<'PY'
+import json
+import subprocess
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    plan = json.load(source)
+names = plan.get("names")
+if plan.get("mode") != "explicit" or not isinstance(names, list) or not names:
+    raise SystemExit("invalid explicit plugin selection plan")
+result = subprocess.run(["aidlc", "engine", "plugin", "select", *names], check=False)
+raise SystemExit(result.returncode)
+PY
+}
+
+verify_flow_plugin_selection() {
+  aidlc_flow_verify_project=$1
+  aidlc_flow_verify_harness=$2
+  aidlc_flow_verify_status=$3
+  aidlc_flow_verify_plan=$4
+  python3 - "$aidlc_flow_verify_project/.$aidlc_flow_verify_harness/tools/data/harness.json" \
+    "$aidlc_flow_verify_status" "$aidlc_flow_verify_plan" <<'PY'
+import json
+import sys
+
+harness_path, status_path, plan_path = sys.argv[1:]
+with open(harness_path, encoding="utf-8") as source:
+    harness = json.load(source)
+with open(status_path, encoding="utf-8") as source:
+    status = json.load(source)
+with open(plan_path, encoding="utf-8") as source:
+    plan = json.load(source)
+if plan["mode"] == "implicit":
+    if "plugins" in harness:
+        raise SystemExit("implicit all-installed plugin selection was overwritten")
+    expected = {"flow"}
+else:
+    selected = harness.get("plugins")
+    if not isinstance(selected, list) or set(selected) != set(plan["names"]) or len(selected) != len(plan["names"]):
+        raise SystemExit("explicit plugin selection was not preserved")
+    expected = set(plan["names"]) - {"aidlc"}
+data = status.get("data") if isinstance(status, dict) else None
+rows = data.get("statuses") if isinstance(data, dict) else None
+if not isinstance(status, dict) or status.get("schemaVersion") != 1 or status.get("ok") is not True or not isinstance(rows, list):
+    raise SystemExit("plugin list returned an invalid final status document")
+states = {}
+for row in rows:
+    if isinstance(row, dict) and isinstance(row.get("key"), str):
+        states[row["key"]] = row.get("state")
+for name in expected:
+    if states.get(name) != "current":
+        raise SystemExit(f'enabled plugin "{name}" is not current: {states.get(name)!r}')
+PY
+}
+
 install_flow_plugin() (
   set -e
   aidlc_flow_project=$1
@@ -488,15 +606,37 @@ PY
       ;;
   esac
 
-  # A newly installed host plugin is discoverable by the plugin engine but is
-  # not part of the project graph until the first sync.  Compose it once, keep
-  # the official core plugin selected with flow, then sync the persisted
-  # selection.  Selecting only flow disables core producers and makes the
-  # flow-slice artifact closure invalid.
+  # Compose the host inventory before inspecting the canonical project
+  # selection. A missing `plugins` key means all installed plugins are enabled;
+  # do not turn that implicit policy into a restrictive explicit list.
+  AIDLC_HARNESS_DIR=".$aidlc_flow_harness" AIDLC_HARNESS_NAME="$aidlc_flow_harness" \
+    aidlc engine plugin sync
+  aidlc_flow_engine_status="$aidlc_flow_inventory/engine-plugins.json"
+  aidlc_flow_selection_plan="$aidlc_flow_inventory/selection-plan.json"
+  AIDLC_HARNESS_DIR=".$aidlc_flow_harness" AIDLC_HARNESS_NAME="$aidlc_flow_harness" \
+    aidlc engine plugin list --json > "$aidlc_flow_engine_status"
+  flow_plugin_selection_plan "$aidlc_flow_project" "$aidlc_flow_harness" \
+    "$aidlc_flow_engine_status" "$aidlc_flow_selection_plan" || {
+    plugin_install_die "unable to preserve the existing plugin selection"
+    exit 1
+  }
+  aidlc_flow_selection_mode=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["mode"])' \
+    "$aidlc_flow_selection_plan") || exit
+  if [ "$aidlc_flow_selection_mode" = explicit ]; then
+    AIDLC_HARNESS_DIR=".$aidlc_flow_harness" AIDLC_HARNESS_NAME="$aidlc_flow_harness" \
+      apply_flow_plugin_selection "$aidlc_flow_selection_plan"
+  fi
   AIDLC_HARNESS_DIR=".$aidlc_flow_harness" AIDLC_HARNESS_NAME="$aidlc_flow_harness" \
     aidlc engine plugin sync
   AIDLC_HARNESS_DIR=".$aidlc_flow_harness" AIDLC_HARNESS_NAME="$aidlc_flow_harness" \
-    aidlc engine plugin select aidlc flow
+    aidlc engine gen runners >/dev/null
   AIDLC_HARNESS_DIR=".$aidlc_flow_harness" AIDLC_HARNESS_NAME="$aidlc_flow_harness" \
-    aidlc engine plugin sync
+    aidlc engine gen runner-scopes >/dev/null
+  AIDLC_HARNESS_DIR=".$aidlc_flow_harness" AIDLC_HARNESS_NAME="$aidlc_flow_harness" \
+    aidlc engine plugin list --json > "$aidlc_flow_engine_status"
+  verify_flow_plugin_selection "$aidlc_flow_project" "$aidlc_flow_harness" \
+    "$aidlc_flow_engine_status" "$aidlc_flow_selection_plan" || {
+    plugin_install_die "plugin selection or composed status verification failed"
+    exit 1
+  }
 )

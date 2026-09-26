@@ -37,7 +37,19 @@ SH
 cat > "$fake_bin/aidlc" <<'SH'
 #!/bin/sh
 printf 'aidlc|%s\n' "$*" >> "$REAL_HOST_LOG"
-exit 0
+case "$*" in
+  'engine plugin sync')
+    fake_harness=${AIDLC_HARNESS_DIR:-.codex}
+    mkdir -p "$PWD/$fake_harness/tools/data"
+    [ -f "$PWD/$fake_harness/tools/data/harness.json" ] ||
+      printf '%s\n' '{}' > "$PWD/$fake_harness/tools/data/harness.json"
+    ;;
+  'engine plugin list --json')
+    printf '%s\n' '{"schemaVersion":1,"ok":true,"data":{"statuses":[{"key":"flow","state":"current"}]}}'
+    ;;
+  'engine gen runners'|'engine gen runner-scopes') ;;
+  *) exit 90 ;;
+esac
 SH
 chmod +x "$fake_bin/codex" "$fake_bin/claude" "$fake_bin/aidlc"
 

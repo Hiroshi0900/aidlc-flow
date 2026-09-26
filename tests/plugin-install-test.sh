@@ -97,8 +97,39 @@ cat > "$fake_bin/aidlc" <<'SH'
 #!/bin/sh
 printf 'aidlc|%s|%s|harness=%s/%s\n' "$PWD" "$*" "${AIDLC_HARNESS_DIR:-}" "${AIDLC_HARNESS_NAME:-}" >> "$HOST_FAKE_LOG"
 case "$*" in
-  'engine plugin select aidlc flow') exit "${AIDLC_FAKE_SELECT_STATUS:-0}" ;;
-  'engine plugin sync') exit "${AIDLC_FAKE_SYNC_STATUS:-0}" ;;
+  'engine plugin sync')
+    [ "${AIDLC_FAKE_SYNC_STATUS:-0}" -eq 0 ] || exit "$AIDLC_FAKE_SYNC_STATUS"
+    fake_harness=${AIDLC_HARNESS_DIR:-.codex}
+    mkdir -p "$PWD/$fake_harness/tools/data"
+    [ -f "$PWD/$fake_harness/tools/data/harness.json" ] ||
+      printf '%s\n' "{\"harnessDir\":\"$fake_harness\"}" > "$PWD/$fake_harness/tools/data/harness.json"
+    ;;
+  'engine plugin list --json')
+    exit_status=${AIDLC_FAKE_LIST_STATUS:-0}
+    [ "$exit_status" -eq 0 ] || exit "$exit_status"
+    if [ -n "${AIDLC_FAKE_ENGINE_LIST_JSON:-}" ]; then
+      printf '%s\n' "$AIDLC_FAKE_ENGINE_LIST_JSON"
+    else
+      printf '%s\n' '{"schemaVersion":1,"ok":true,"data":{"statuses":[{"key":"flow","state":"current"}]}}'
+    fi
+    ;;
+  'engine plugin select '*)
+    [ "${AIDLC_FAKE_SELECT_STATUS:-0}" -eq 0 ] || exit "$AIDLC_FAKE_SELECT_STATUS"
+    shift 3
+    python3 - "$PWD/${AIDLC_HARNESS_DIR:-.codex}/tools/data/harness.json" "$@" <<'PY'
+import json, os, sys
+path, *names = sys.argv[1:]
+with open(path, encoding="utf-8") as source:
+    value = json.load(source)
+value["plugins"] = names
+temporary = path + ".tmp"
+with open(temporary, "w", encoding="utf-8") as destination:
+    json.dump(value, destination)
+    destination.write("\n")
+os.replace(temporary, path)
+PY
+    ;;
+  'engine gen runners'|'engine gen runner-scopes') ;;
   *) exit 93 ;;
 esac
 SH
@@ -139,8 +170,11 @@ codex|$project|plugin marketplace add $projection_root/codex
 codex|$project|plugin list --json
 codex|$project|plugin add aidlc-flow@aidlc-plugins
 aidlc|$project|engine plugin sync|harness=.codex/codex
-aidlc|$project|engine plugin select aidlc flow|harness=.codex/codex
-aidlc|$project|engine plugin sync|harness=.codex/codex" "Codex host install precedes project selection and sync"
+aidlc|$project|engine plugin list --json|harness=.codex/codex
+aidlc|$project|engine plugin sync|harness=.codex/codex
+aidlc|$project|engine gen runners|harness=.codex/codex
+aidlc|$project|engine gen runner-scopes|harness=.codex/codex
+aidlc|$project|engine plugin list --json|harness=.codex/codex" "Codex host install precedes project selection and sync"
 
 : > "$HOST_FAKE_LOG"
 CODEX_MARKETPLACES_JSON="{\"marketplaces\":[{\"name\":\"aidlc-plugins\",\"root\":\"$projection_root/codex\",\"marketplaceSource\":{\"sourceType\":\"local\",\"source\":\"$projection_root/codex\"}}]}"
@@ -150,8 +184,11 @@ install_flow_plugin "$project" codex "$projection_root/codex"
 assert_eq "$(cat "$HOST_FAKE_LOG")" "codex|$project|plugin marketplace list --json
 codex|$project|plugin list --json
 aidlc|$project|engine plugin sync|harness=.codex/codex
-aidlc|$project|engine plugin select aidlc flow|harness=.codex/codex
-aidlc|$project|engine plugin sync|harness=.codex/codex" "same Codex source is host-idempotent"
+aidlc|$project|engine plugin list --json|harness=.codex/codex
+aidlc|$project|engine plugin sync|harness=.codex/codex
+aidlc|$project|engine gen runners|harness=.codex/codex
+aidlc|$project|engine gen runner-scopes|harness=.codex/codex
+aidlc|$project|engine plugin list --json|harness=.codex/codex" "same Codex source is host-idempotent"
 unset CODEX_PLUGINS_JSON
 
 : > "$HOST_FAKE_LOG"
@@ -214,8 +251,11 @@ claude|$project|plugin marketplace add --scope project $projection_root/claude
 claude|$project|plugin list --json
 claude|$project|plugin install --scope project --yes aidlc-flow@aidlc-plugins
 aidlc|$project|engine plugin sync|harness=.claude/claude
-aidlc|$project|engine plugin select aidlc flow|harness=.claude/claude
-aidlc|$project|engine plugin sync|harness=.claude/claude" "Claude project-local install precedes project selection and sync"
+aidlc|$project|engine plugin list --json|harness=.claude/claude
+aidlc|$project|engine plugin sync|harness=.claude/claude
+aidlc|$project|engine gen runners|harness=.claude/claude
+aidlc|$project|engine gen runner-scopes|harness=.claude/claude
+aidlc|$project|engine plugin list --json|harness=.claude/claude" "Claude project-local install precedes project selection and sync"
 
 : > "$HOST_FAKE_LOG"
 CLAUDE_MARKETPLACES_JSON="[{\"name\":\"aidlc-plugins\",\"source\":\"directory\",\"path\":\"$projection_root/claude\",\"installLocation\":\"$projection_root/claude\"}]"
@@ -225,8 +265,11 @@ install_flow_plugin "$project" claude "$projection_root/claude"
 assert_eq "$(cat "$HOST_FAKE_LOG")" "claude|$project|plugin marketplace list --json
 claude|$project|plugin list --json
 aidlc|$project|engine plugin sync|harness=.claude/claude
-aidlc|$project|engine plugin select aidlc flow|harness=.claude/claude
-aidlc|$project|engine plugin sync|harness=.claude/claude" "same Claude source is host-idempotent"
+aidlc|$project|engine plugin list --json|harness=.claude/claude
+aidlc|$project|engine plugin sync|harness=.claude/claude
+aidlc|$project|engine gen runners|harness=.claude/claude
+aidlc|$project|engine gen runner-scopes|harness=.claude/claude
+aidlc|$project|engine plugin list --json|harness=.claude/claude" "same Claude source is host-idempotent"
 unset CLAUDE_MARKETPLACES_JSON CLAUDE_PLUGINS_JSON
 
 : > "$HOST_FAKE_LOG"
@@ -295,8 +338,11 @@ claude|$project|plugin list --json
 claude|$project|plugin enable --scope project aidlc-flow@aidlc-plugins
 claude|$project|plugin list --json
 aidlc|$project|engine plugin sync|harness=.claude/claude
-aidlc|$project|engine plugin select aidlc flow|harness=.claude/claude
-aidlc|$project|engine plugin sync|harness=.claude/claude" "disabled Claude version update is verified before enable and sync"
+aidlc|$project|engine plugin list --json|harness=.claude/claude
+aidlc|$project|engine plugin sync|harness=.claude/claude
+aidlc|$project|engine gen runners|harness=.claude/claude
+aidlc|$project|engine gen runner-scopes|harness=.claude/claude
+aidlc|$project|engine plugin list --json|harness=.claude/claude" "disabled Claude version update is verified before enable and sync"
 assert_contains "$(cat "$HOST_FAKE_LOG")" "plugin update --scope project --yes aidlc-flow@aidlc-plugins" "new Claude version uses the supported project update path"
 assert_contains "$(cat "$HOST_FAKE_LOG")" "plugin enable --scope project aidlc-flow@aidlc-plugins" "disabled Claude version is enabled after update"
 assert_contains "$(cat "$claude_cache/scopes/flow-slice.md")" "changed Claude payload" "Claude version update installs changed payload"
@@ -328,12 +374,68 @@ for update_harness in codex claude; do
   unset HOST_FAKE_MUTATE_STATUS CODEX_MARKETPLACES_JSON CODEX_PLUGINS_JSON CLAUDE_MARKETPLACES_JSON CLAUDE_PLUGINS_JSON
 done
 
-for failure in host select sync; do
+# The canonical absence of `plugins` means all installed plugins remain enabled.
+python3 - "$project/.codex/tools/data/harness.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+if "plugins" in value:
+    raise SystemExit("implicit all-installed selection became explicit")
+PY
+
+# An explicit project selection is extended as a set union without losing its
+# existing plugin or unrelated harness settings.
+python3 - "$project/.codex/tools/data/harness.json" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+value = json.load(open(path, encoding="utf-8"))
+value["plugins"] = ["third", "aidlc"]
+value["unrelatedSetting"] = {"preserve": True}
+temporary = path + ".tmp"
+with open(temporary, "w", encoding="utf-8") as destination:
+    json.dump(value, destination)
+    destination.write("\n")
+os.replace(temporary, path)
+PY
+AIDLC_FAKE_ENGINE_LIST_JSON='{"schemaVersion":1,"ok":true,"data":{"statuses":[{"key":"flow","state":"current"},{"key":"third","state":"current"}]}}'
+export AIDLC_FAKE_ENGINE_LIST_JSON
+: > "$HOST_FAKE_LOG"
+install_flow_plugin "$project" codex "$projection_root/codex"
+assert_contains "$(cat "$HOST_FAKE_LOG")" "engine plugin select third aidlc flow" "explicit selection preserves third plugin and adds flow"
+python3 - "$project/.codex/tools/data/harness.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+if value.get("plugins") != ["third", "aidlc", "flow"]:
+    raise SystemExit(f'explicit selection was not preserved: {value.get("plugins")!r}')
+if value.get("unrelatedSetting") != {"preserve": True}:
+    raise SystemExit("unrelated harness setting changed")
+PY
+
+cp "$project/.codex/tools/data/harness.json" "$tmp/valid-explicit-harness.json"
+python3 - "$project/.codex/tools/data/harness.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+value = json.load(open(path, encoding="utf-8"))
+value["plugins"] = ["third;unsafe", "aidlc"]
+with open(path, "w", encoding="utf-8") as destination:
+    json.dump(value, destination)
+    destination.write("\n")
+PY
+: > "$HOST_FAKE_LOG"
+set +e
+install_flow_plugin "$project" codex "$projection_root/codex" >/dev/null 2>&1
+invalid_selection_status=$?
+set -e
+assert_eq "$invalid_selection_status" 1 "unsafe explicit plugin name is rejected"
+case "$(cat "$HOST_FAKE_LOG")" in *'engine plugin select'*) fail "unsafe plugin name reached official selection argv" ;; esac
+cp "$tmp/valid-explicit-harness.json" "$project/.codex/tools/data/harness.json"
+
+for failure in host select sync list; do
   : > "$HOST_FAKE_LOG"
   case "$failure" in
     host) HOST_FAKE_MUTATE_STATUS=31; export HOST_FAKE_MUTATE_STATUS ;;
     select) AIDLC_FAKE_SELECT_STATUS=32; export AIDLC_FAKE_SELECT_STATUS ;;
     sync) AIDLC_FAKE_SYNC_STATUS=33; export AIDLC_FAKE_SYNC_STATUS ;;
+    list) AIDLC_FAKE_LIST_STATUS=34; export AIDLC_FAKE_LIST_STATUS ;;
   esac
   set +e
   install_flow_plugin "$project" codex "$projection_root/codex" >/dev/null 2>&1
@@ -347,15 +449,21 @@ for failure in host select sync; do
       ;;
     select)
       assert_eq "$failure_status" 32 "selection failure propagates"
-      case "$(cat "$HOST_FAKE_LOG")" in *'engine plugin select aidlc flow'*'engine plugin sync'*) fail "selection failure must stop before final sync" ;; esac
+      case "$(cat "$HOST_FAKE_LOG")" in *'engine plugin select third aidlc flow'*'engine plugin sync'*) fail "selection failure must stop before final sync" ;; esac
       unset AIDLC_FAKE_SELECT_STATUS
       ;;
     sync)
       assert_eq "$failure_status" 33 "sync failure propagates"
       unset AIDLC_FAKE_SYNC_STATUS
       ;;
+    list)
+      assert_eq "$failure_status" 34 "plugin list failure propagates"
+      case "$(cat "$HOST_FAKE_LOG")" in *'engine plugin list --json'*'engine plugin select'*) fail "list failure must stop before selection" ;; esac
+      unset AIDLC_FAKE_LIST_STATUS
+      ;;
   esac
 done
+unset AIDLC_FAKE_ENGINE_LIST_JSON
 
 for unsafe in relative-project relative-projection projection-symlink; do
   : > "$HOST_FAKE_LOG"

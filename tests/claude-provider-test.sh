@@ -34,11 +34,16 @@ if [ "$*" = '--version' ]; then
   exit 0
 fi
 if [ "$*" = 'engine plugin sync' ]; then
+  mkdir -p "$PWD/${AIDLC_HARNESS_DIR:-.claude}/tools/data"
+  [ -f "$PWD/${AIDLC_HARNESS_DIR:-.claude}/tools/data/harness.json" ] ||
+    printf '%s\n' '{}' > "$PWD/${AIDLC_HARNESS_DIR:-.claude}/tools/data/harness.json"
   exit 0
 fi
-if [ "$*" = 'engine plugin select aidlc flow' ]; then
+if [ "$*" = 'engine plugin list --json' ]; then
+  printf '%s\n' '{"schemaVersion":1,"ok":true,"data":{"statuses":[{"key":"flow","state":"current"}]}}'
   exit 0
 fi
+case "$*" in 'engine gen runners'|'engine gen runner-scopes') exit 0 ;; esac
 command_name=$1
 shift
 project_dir=$PWD
