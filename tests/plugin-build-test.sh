@@ -108,4 +108,20 @@ set -e
 assert_contains "$relative_home_output" "must be an absolute path" \
   "relative AI-DLC home reports a clear error"
 
+override_symlink_home="$tmp/override-symlink-home"
+override_real_runtime="$tmp/override-real-runtime"
+mkdir -p "$override_symlink_home" \
+  "$override_real_runtime/claude/.claude/tools"
+: >"$override_real_runtime/claude/.claude/tools/aidlc-plugin-validate.ts"
+: >"$override_real_runtime/claude/.claude/tools/aidlc-plugin-build.ts"
+ln -s "$override_real_runtime" "$override_symlink_home/runtime"
+set +e
+override_symlink_output=$(AIDLC_FLOW_AIDLC_HOME="$override_symlink_home" \
+  require_plugin_toolchain 2>&1)
+override_symlink_status=$?
+set -e
+[ "$override_symlink_status" -ne 0 ] || fail "override runtime symlink is rejected"
+assert_contains "$override_symlink_output" "missing or unsafe" \
+  "override runtime symlink reports a clear error"
+
 printf 'PASS: plugin-build-test\n'

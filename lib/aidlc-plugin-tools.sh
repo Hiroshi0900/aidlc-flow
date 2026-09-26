@@ -41,6 +41,8 @@ require_plugin_toolchain() {
     aidlc_flow_aidlc_home="$aidlc_flow_data_root/aidlc/versions/$aidlc_flow_active_version"
   fi
 
+  # The trust boundary begins at the selected version home. HOME/XDG ancestors
+  # may legitimately be symlinks, but the version runtime itself must not be.
   for aidlc_flow_runtime_path in \
     "$aidlc_flow_aidlc_home" \
     "$aidlc_flow_aidlc_home/runtime" \

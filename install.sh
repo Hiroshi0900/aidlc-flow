@@ -31,61 +31,101 @@ command_path="$bin_home/aidlc-flow"
 if [ -d "$command_path" ] && [ ! -L "$command_path" ]; then
   printf 'aidlc-flow: command path is a directory: %s\n' "$command_path" >&2
   exit 1
+elif [ -e "$command_path" ] && [ ! -L "$command_path" ]; then
+  printf 'aidlc-flow: command path is not a symbolic link: %s\n' "$command_path" >&2
+  exit 1
 fi
 
 require_plugin_toolchain
 
-cleanup_staging() {
-  for staging_name in bin lib memory plugins plugin-dist; do
-    rm -rf "$destination/$staging_name.new"
-  done
+mkdir -p "$data_home" "$bin_home"
+staging="$data_home/aidlc-flow.new"
+backup="$data_home/aidlc-flow.old"
+destination_had_previous=false
+destination_swap_started=false
+command_had_previous=false
+command_previous_target=
+command_update_attempted=false
+install_committed=false
+
+rollback_install() {
+  rollback_status=$?
+  trap - EXIT HUP INT TERM
+  set +e
+
+  if [ "$install_committed" != true ]; then
+    if [ "$destination_swap_started" = true ]; then
+      rm -rf "$destination"
+      if [ "$destination_had_previous" = true ] && [ -e "$backup" ]; then
+        mv "$backup" "$destination"
+      fi
+    elif [ "$destination_had_previous" = true ] &&
+      [ ! -e "$destination" ] && [ -e "$backup" ]; then
+      mv "$backup" "$destination"
+    fi
+
+    if [ "$command_update_attempted" = true ]; then
+      if [ -L "$command_path" ]; then
+        rm -f "$command_path"
+      fi
+      if [ "$command_had_previous" = true ]; then
+        ln -s "$command_previous_target" "$command_path"
+      fi
+    fi
+  fi
+
+  rm -rf "$staging"
+  if [ "$install_committed" = true ]; then
+    rm -rf "$backup"
+  fi
+  [ "$rollback_status" -ne 0 ] || rollback_status=1
+  exit "$rollback_status"
 }
 
-replace_installed_tree() {
-  installed_name=$1
-  rm -rf "$destination/$installed_name.old"
-  if [ -e "$destination/$installed_name" ] || [ -L "$destination/$installed_name" ]; then
-    mv "$destination/$installed_name" "$destination/$installed_name.old"
-  fi
-  if mv "$destination/$installed_name.new" "$destination/$installed_name"; then
-    rm -rf "$destination/$installed_name.old"
-    return 0
-  fi
-  if [ -e "$destination/$installed_name.old" ] || [ -L "$destination/$installed_name.old" ]; then
-    mv "$destination/$installed_name.old" "$destination/$installed_name"
-  fi
-  return 1
-}
+trap rollback_install EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-mkdir -p "$destination" "$bin_home"
-trap cleanup_staging EXIT HUP INT TERM
-cleanup_staging
+[ ! -e "$backup" ] && [ ! -L "$backup" ] || {
+  printf 'aidlc-flow: install backup path already exists: %s\n' "$backup" >&2
+  exit 1
+}
+rm -rf "$staging"
+mkdir -p "$staging"
 for directory in bin lib memory plugins; do
-  rm -rf "$destination/$directory.new"
-  mkdir -p "$destination/$directory.new"
-  cp -R "$root/$directory/." "$destination/$directory.new/"
+  mkdir -p "$staging/$directory"
+  cp -R "$root/$directory/." "$staging/$directory/"
 done
 
-validate_flow_plugin "$destination/plugins.new/flow" || {
+validate_flow_plugin "$staging/plugins/flow" || {
   printf 'aidlc-flow: failed to validate plugin source\n' >&2
   exit 1
 }
-mkdir -p "$destination/plugin-dist.new"
+mkdir -p "$staging/plugin-dist"
 for harness in codex claude; do
-  build_flow_projection "$harness" "$destination/plugin-dist.new/$harness" \
-    "$destination/plugins.new/flow" || {
+  build_flow_projection "$harness" "$staging/plugin-dist/$harness" \
+    "$staging/plugins/flow" || {
     printf 'aidlc-flow: failed to build %s plugin projection\n' "$harness" >&2
     exit 1
   }
 done
+chmod +x "$staging/bin/aidlc-flow"
 
-for directory in bin lib memory plugins plugin-dist; do
-  replace_installed_tree "$directory" || {
-    printf 'aidlc-flow: failed to install %s\n' "$directory" >&2
-    exit 1
-  }
-done
-chmod +x "$destination/bin/aidlc-flow"
+if [ -L "$command_path" ]; then
+  command_had_previous=true
+  command_previous_target=$(readlink "$command_path")
+fi
+
+if [ -e "$destination" ]; then
+  destination_had_previous=true
+  mv "$destination" "$backup"
+fi
+destination_swap_started=true
+mv "$staging" "$destination"
+command_update_attempted=true
 ln -sfn "$destination/bin/aidlc-flow" "$command_path"
+install_committed=true
+rm -rf "$backup"
 trap - EXIT HUP INT TERM
 printf 'Installed aidlc-flow at %s\n' "$command_path"
