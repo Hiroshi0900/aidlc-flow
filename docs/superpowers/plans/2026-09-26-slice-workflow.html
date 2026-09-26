@@ -1,0 +1,747 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Vertical Slice Workflow Implementation Plan</title>
+<style>
+:root{--paper:#f7f5ef;--surface:#fff;--ink:#20242a;--muted:#5f6873;--line:#d9d5cc;--accent:#294c73;--code:#20242a}
+*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;line-height:1.8}.page{max-width:980px;margin:0 auto;padding:56px 42px 120px;background:var(--surface);box-shadow:0 0 48px #0000000d}h1{font-family:serif;font-size:36px;line-height:1.4;border-bottom:3px solid var(--ink);padding-bottom:18px}h2{font-family:serif;font-size:24px;margin-top:56px;border-bottom:1px solid var(--line);padding-bottom:8px}h3{font-size:18px;margin-top:32px;color:var(--accent)}p,li{font-size:15px}a{color:var(--accent)}code{background:#f0eee8;color:var(--accent);padding:2px 6px;border-radius:5px}pre{background:var(--code);color:#e8edf3;padding:20px 24px;border-radius:12px;overflow:auto;line-height:1.6}pre code{background:transparent;color:inherit;padding:0}ul,ol{padding-left:1.6em}@media(max-width:720px){.page{padding:28px 20px 80px}h1{font-size:28px}}
+</style>
+</head>
+<body><main class="page"><h1>Vertical Slice Workflow Implementation Plan</h1>
+<p>&gt; <strong>For agentic workers:</strong> REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (<code>- [ ]</code>) syntax for tracking.</p>
+<p><strong>Goal:</strong> <code>aidlc-flow</code> に、1 intent・1 PR・mainへのマージを単位とするAI-DLC v2.9.0向け縦切りワークフローを追加する。</p>
+<p><strong>Architecture:</strong> <code>plugins/aidlc-flow-slice/</code> を公式AI-DLCプラグインのソースとして管理し、公式のvalidate/buildでCodex・Claude projectionを生成する。<code>install.sh</code> がprojectionを安定したインストール先へ置き、<code>aidlc-flow init</code> がホストのローカルmarketplace経由でプラグインを有効化してから、公式plugin sync・doctorで検証する。scopeはcore reviewerを停止し、Build and Test後の専用レビューstageだけを独立レビューとして実行する。</p>
+<p><strong>Tech Stack:</strong> POSIX shell、AI-DLC CLI v2.9.0 plugin API、Codex/Claude plugin marketplace、Markdown stage/scope definitions、既存shellテストハーネス</p>
+<p>---</p>
+<h2>ファイル構成</h2>
+<ul>
+<li><code>plugins/aidlc-flow-slice/.aidlc-plugin/plugin.json</code>: plugin source manifest。論理plugin名は <code>flow-slice</code>、ホスト上の名前は <code>aidlc-flow-slice</code>。</li>
+<li><code>plugins/aidlc-flow-slice/scopes/aidlc-flow-slice.md</code>: Minimal depth、Standard test strategy、review capなしのscope。</li>
+<li><code>plugins/aidlc-flow-slice/stages/inception/slice-contract.md</code>: 1〜3件の受入条件と最初の境界テストを固定する。</li>
+<li><code>plugins/aidlc-flow-slice/stages/construction/slice-review.md</code>: Build and Test後の唯一の独立レビュー。</li>
+<li><code>plugins/aidlc-flow-slice/stages/construction/merge-readiness.md</code>: ローカル、PR、CI、未検証事項、マージ承認を検査する。</li>
+<li><code>plugins/aidlc-flow-slice/contributions/**</code>: core initialization、code-generation、build-and-testをslice scopeへ参加させる。</li>
+<li><code>lib/plugin.sh</code>: バージョン検査、projection検査、ホストplugin導入、選択、syncを担当する。</li>
+<li><code>bin/aidlc-flow</code>: 既存bootstrapへplugin処理を順序どおり組み込む。</li>
+<li><code>install.sh</code>: plugin sourceを配布物へ含め、両harness projectionを生成する。</li>
+<li><code>tests/plugin-source-test.sh</code>: source定義の静的契約。</li>
+<li><code>tests/plugin-build-test.sh</code>: 公式validate/buildと両projectionの契約。</li>
+<li><code>tests/version-test.sh</code>: v2.9.0固定と診断。</li>
+<li><code>tests/plugin-install-test.sh</code>: marketplace、選択、syncの順序と失敗伝播。</li>
+<li><code>tests/slice-routing-test.sh</code>: scopeのstage経路、review重複排除、成果物の契約。</li>
+<li><code>tests/install-test.sh</code>, <code>tests/bootstrap-test.sh</code>, <code>tests/cli-test.sh</code>: 既存導入・初期化・表示の回帰。</li>
+<li><code>README.md</code>: 導入方法、入口、mainマージ境界、比較測定項目。</li>
+</ul>
+<h2>Task 1: Plugin sourceの最小骨格をTDDで追加する</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>tests/plugin-source-test.sh</code></li>
+<li>Create: <code>plugins/aidlc-flow-slice/.aidlc-plugin/plugin.json</code></li>
+<li>Create: <code>plugins/aidlc-flow-slice/scopes/aidlc-flow-slice.md</code></li>
+<li>Create: <code>plugins/aidlc-flow-slice/stages/inception/slice-contract.md</code></li>
+<li>Create: <code>plugins/aidlc-flow-slice/stages/construction/slice-review.md</code></li>
+<li>Create: <code>plugins/aidlc-flow-slice/stages/construction/merge-readiness.md</code></li>
+</ul>
+<ul>
+<li>[ ] <strong>Step 1: 存在・所有者・scope方針を固定する失敗テストを書く</strong></li>
+</ul>
+<pre><code class="language-sh">#!/bin/sh
+set -eu
+. &quot;$(dirname &quot;$0&quot;)/testlib.sh&quot;
+root=$(CDPATH= cd -- &quot;$(dirname &quot;$0&quot;)/..&quot; &amp;&amp; pwd)
+plugin=&quot;$root/plugins/aidlc-flow-slice&quot;
+
+for file in \
+  .aidlc-plugin/plugin.json \
+  scopes/aidlc-flow-slice.md \
+  stages/inception/slice-contract.md \
+  stages/construction/slice-review.md \
+  stages/construction/merge-readiness.md
+do
+  [ -f &quot;$plugin/$file&quot; ] || fail &quot;missing plugin source: $file&quot;
+done
+
+assert_contains &quot;$(cat &quot;$plugin/.aidlc-plugin/plugin.json&quot;)&quot; '&quot;name&quot;: &quot;flow-slice&quot;' &quot;manifest uses stable logical name&quot;
+scope=$(cat &quot;$plugin/scopes/aidlc-flow-slice.md&quot;)
+assert_contains &quot;$scope&quot; 'name: aidlc-flow-slice' &quot;scope has the public runner name&quot;
+assert_contains &quot;$scope&quot; 'testStrategy: Standard' &quot;scope requires integration testing&quot;
+assert_contains &quot;$scope&quot; 'review_cap: none' &quot;core stage reviewers are disabled&quot;
+assert_contains &quot;$scope&quot; 'change_control: relaxed' &quot;small slices avoid reopening unchanged gates&quot;
+assert_contains &quot;$scope&quot; 'learnings: off' &quot;slice scope avoids duplicate learning ceremony&quot;
+assert_contains &quot;$scope&quot; 'summary_confirmation: off' &quot;slice scope avoids duplicate summary prompts&quot;
+
+review=$(cat &quot;$plugin/stages/construction/slice-review.md&quot;)
+assert_contains &quot;$review&quot; 'lead_agent: aidlc-architecture-reviewer-agent' &quot;slice review is independent&quot;
+case &quot;$review&quot; in
+  *'reviewer:'*) fail &quot;slice review must not declare a capped nested reviewer&quot; ;;
+esac
+printf 'PASS: plugin-source-test\n'</code></pre>
+<ul>
+<li>[ ] <strong>Step 2: テストを実行し、source未作成で失敗することを確認する</strong></li>
+</ul>
+<p>Run: <code>/bin/sh tests/plugin-source-test.sh</code></p>
+<p>Expected: <code>FAIL: missing plugin source: .aidlc-plugin/plugin.json</code></p>
+<ul>
+<li>[ ] <strong>Step 3: manifestとscopeを作成する</strong></li>
+</ul>
+<p><code>plugins/aidlc-flow-slice/.aidlc-plugin/plugin.json</code>:</p>
+<pre><code class="language-json">{
+  &quot;name&quot;: &quot;flow-slice&quot;,
+  &quot;version&quot;: &quot;0.1.0&quot;,
+  &quot;description&quot;: &quot;A fast vertical slice from acceptance contract through review and merge readiness.&quot;,
+  &quot;author&quot;: { &quot;name&quot;: &quot;aidlc-flow&quot; },
+  &quot;dependencies&quot;: [&quot;core&quot;],
+  &quot;aidlc&quot;: {
+    &quot;contributes&quot;: {
+      &quot;stages&quot;: &quot;stages/&quot;,
+      &quot;scopes&quot;: &quot;scopes/&quot;,
+      &quot;contributions&quot;: &quot;contributions/&quot;
+    }
+  }
+}</code></pre>
+<p><code>plugins/aidlc-flow-slice/scopes/aidlc-flow-slice.md</code>:</p>
+<pre><code class="language-markdown">---
+name: aidlc-flow-slice
+plugin: flow-slice
+depth: Minimal
+testStrategy: Standard
+keywords:
+  - vertical slice
+  - slice
+  - main merge
+description: Deliver one testable user-visible slice through review and merge readiness
+skeleton: off
+runner: true
+review_cap: none
+change_control: relaxed
+sensors: on
+learnings: off
+summary_confirmation: off
+---
+
+# aidlc-flow-slice scope
+
+Use one intent, one branch, and one pull request for a small user-visible slice.
+The path is Slice Contract, Code Generation, Build and Test, Slice Review, and
+Merge Readiness. Do not create horizontal Units.</code></pre>
+<ul>
+<li>[ ] <strong>Step 4: Slice Contract stageを作成する</strong></li>
+</ul>
+<p><code>plugins/aidlc-flow-slice/stages/inception/slice-contract.md</code>:</p>
+<pre><code class="language-markdown">---
+slug: slice-contract
+name: Slice Contract
+plugin: flow-slice
+phase: inception
+execution: ALWAYS
+condition: Define one small user-visible slice before implementation.
+lead_agent: aidlc-product-agent
+support_agents: []
+mode: inline
+produces:
+  - requirements
+  - slice-contract
+consumes: []
+requires_stage:
+  - state-init
+sensors:
+  - required-sections
+scopes:
+  - aidlc-flow-slice
+summary_confirmation: if-present
+required_sections:
+  - Acceptance Criteria
+  - Boundary Test
+  - Merge Safety
+inputs: The requested user-visible change and current workspace state
+outputs: requirements.md and slice-contract.md under the engine-resolved record directory
+---
+
+# Slice Contract
+
+Follow the active stage protocol and keep this contract short.
+
+## Steps
+
+1. State one to three externally observable acceptance criteria under
+   `## Acceptance Criteria`.
+2. Name the first boundary test that must fail before implementation under
+   `## Boundary Test`.
+3. List changed external boundaries and required round-trip evidence.
+4. Under `## Merge Safety`, decide whether this slice can merge safely in one
+   pull request without a feature flag.
+5. If it cannot, stop and ask the human to choose slice splitting, a feature
+   flag, or bundled delivery. Do not ask when the slice is already safe.
+6. Write the same approved contract to `requirements.md` and
+   `slice-contract.md` at the directive-resolved output paths.
+7. Open one approval gate for the complete contract.</code></pre>
+<ul>
+<li>[ ] <strong>Step 5: Slice Review stageを作成する</strong></li>
+</ul>
+<p><code>plugins/aidlc-flow-slice/stages/construction/slice-review.md</code>:</p>
+<pre><code class="language-markdown">---
+slug: slice-review
+name: Slice Review
+plugin: flow-slice
+phase: construction
+execution: ALWAYS
+condition: Review the tested slice once after Build and Test succeeds.
+lead_agent: aidlc-architecture-reviewer-agent
+support_agents: []
+mode: subagent
+produces:
+  - slice-review
+consumes:
+  - artifact: slice-contract
+    required: true
+  - artifact: code-summary
+    required: true
+  - artifact: build-test-results
+    required: true
+requires_stage:
+  - build-and-test
+sensors:
+  - required-sections
+scopes:
+  - aidlc-flow-slice
+required_sections:
+  - Spec Compliance
+  - Findings
+  - Verdict
+inputs: The approved slice contract, implementation summary, source diff, and passing test evidence
+outputs: slice-review.md under the engine-resolved record directory
+---
+
+# Slice Review
+
+This is the slice's only independent review. Do not repeat the disabled
+Code Generation reviewer.
+
+## Steps
+
+1. Review `## Spec Compliance` first and map every acceptance criterion to
+   source and test evidence.
+2. Review code quality, error handling, security, and maintainability second.
+3. Record every item under `## Findings` as Critical, Important, or Optional.
+4. A Critical or Important item blocks approval. Return to implementation,
+   rerun affected tests and the repository-wide check, then review only the
+   changed and affected diff.
+5. Write `## Verdict` as PASS only when no blocking item remains. Otherwise
+   write BLOCKED and list the required fixes.</code></pre>
+<ul>
+<li>[ ] <strong>Step 6: Merge Readiness stageを作成する</strong></li>
+</ul>
+<p><code>plugins/aidlc-flow-slice/stages/construction/merge-readiness.md</code>:</p>
+<pre><code class="language-markdown">---
+slug: merge-readiness
+name: Merge Readiness
+plugin: flow-slice
+phase: construction
+execution: ALWAYS
+condition: Verify local, pull-request, and human approval evidence before merging to main.
+lead_agent: aidlc-delivery-agent
+support_agents: []
+mode: inline
+produces:
+  - merge-readiness
+consumes:
+  - artifact: slice-review
+    required: true
+  - artifact: build-test-results
+    required: true
+requires_stage:
+  - slice-review
+sensors:
+  - required-sections
+scopes:
+  - aidlc-flow-slice
+required_sections:
+  - Local Readiness
+  - Pull Request Readiness
+  - Unverified Items
+  - Measurements
+inputs: Passing tests, the approved review, Git state, pull-request checks, and human approvals
+outputs: merge-readiness.md under the engine-resolved record directory
+---
+
+# Merge Readiness
+
+Never push, create a pull request, merge, or deploy implicitly.
+
+## Steps
+
+1. Under `## Local Readiness`, record the clean working tree, intended commits,
+   latest main integration, repository-wide check command, and fresh result.
+2. Ask separately before push and before pull-request creation.
+3. Under `## Pull Request Readiness`, record the pull-request URL, green CI,
+   resolved Critical and Important findings, and merge-conflict status.
+4. Under `## Unverified Items`, list every missing check. An item tied to an
+   acceptance criterion blocks merge; any other item requires explicit human
+   acceptance.
+5. Ask for explicit main-merge approval. Do not deploy.
+6. After merge, record the merge commit SHA under `## Pull Request Readiness`.
+7. Under `## Measurements`, record elapsed and active time, stage times, human
+   interventions, test failures, review returns, available token/cost data,
+   changed files and lines, commit count, defect discovery stage, and remaining
+   unverified items.</code></pre>
+<ul>
+<li>[ ] <strong>Step 7: 静的契約テストを成功させる</strong></li>
+</ul>
+<p>Run: <code>/bin/sh tests/plugin-source-test.sh</code></p>
+<p>Expected: <code>PASS: plugin-source-test</code></p>
+<ul>
+<li>[ ] <strong>Step 8: コミットする</strong></li>
+</ul>
+<pre><code class="language-bash">git add tests/plugin-source-test.sh plugins/aidlc-flow-slice
+git commit -m &quot;feat: define vertical slice plugin&quot;</code></pre>
+<h2>Task 2: Core stageへのscope参加とstage経路をTDDで固定する</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>tests/slice-routing-test.sh</code></li>
+<li>Create: <code>plugins/aidlc-flow-slice/contributions/initialization/workspace-scaffold.md</code></li>
+<li>Create: <code>plugins/aidlc-flow-slice/contributions/initialization/workspace-detection.md</code></li>
+<li>Create: <code>plugins/aidlc-flow-slice/contributions/initialization/state-init.md</code></li>
+<li>Create: <code>plugins/aidlc-flow-slice/contributions/construction/code-generation.md</code></li>
+<li>Create: <code>plugins/aidlc-flow-slice/contributions/construction/build-and-test.md</code></li>
+</ul>
+<ul>
+<li>[ ] <strong>Step 1: 必要なcore stageだけを追加する失敗テストを書く</strong></li>
+</ul>
+<pre><code class="language-sh">#!/bin/sh
+set -eu
+. &quot;$(dirname &quot;$0&quot;)/testlib.sh&quot;
+root=$(CDPATH= cd -- &quot;$(dirname &quot;$0&quot;)/..&quot; &amp;&amp; pwd)
+contrib=&quot;$root/plugins/aidlc-flow-slice/contributions&quot;
+
+for target in \
+  initialization/workspace-scaffold \
+  initialization/workspace-detection \
+  initialization/state-init \
+  construction/code-generation \
+  construction/build-and-test
+do
+  file=&quot;$contrib/$target.md&quot;
+  [ -f &quot;$file&quot; ] || fail &quot;missing scope contribution: $target&quot;
+  assert_contains &quot;$(cat &quot;$file&quot;)&quot; 'plugin: flow-slice' &quot;$target has plugin ownership&quot;
+  assert_contains &quot;$(cat &quot;$file&quot;)&quot; '    - aidlc-flow-slice' &quot;$target joins slice scope&quot;
+done
+
+if rg -q 'units-generation|delivery-planning|domain-design|functional-design' &quot;$contrib&quot;; then
+  fail &quot;horizontal planning stages must not join the slice scope&quot;
+fi
+printf 'PASS: slice-routing-test\n'</code></pre>
+<ul>
+<li>[ ] <strong>Step 2: テストを実行し、contribution未作成で失敗することを確認する</strong></li>
+</ul>
+<p>Run: <code>/bin/sh tests/slice-routing-test.sh</code></p>
+<p>Expected: <code>FAIL: missing scope contribution: initialization/workspace-scaffold</code></p>
+<ul>
+<li>[ ] <strong>Step 3: 5つのscope contributionを作成する</strong></li>
+</ul>
+<p><code>contributions/initialization/workspace-scaffold.md</code>:</p>
+<pre><code class="language-markdown">---
+target: workspace-scaffold
+plugin: flow-slice
+adds:
+  scopes:
+    - aidlc-flow-slice
+---</code></pre>
+<p><code>contributions/initialization/workspace-detection.md</code>:</p>
+<pre><code class="language-markdown">---
+target: workspace-detection
+plugin: flow-slice
+adds:
+  scopes:
+    - aidlc-flow-slice
+---</code></pre>
+<p><code>contributions/initialization/state-init.md</code>:</p>
+<pre><code class="language-markdown">---
+target: state-init
+plugin: flow-slice
+adds:
+  scopes:
+    - aidlc-flow-slice
+---</code></pre>
+<p><code>contributions/construction/code-generation.md</code>:</p>
+<pre><code class="language-markdown">---
+target: code-generation
+plugin: flow-slice
+adds:
+  scopes:
+    - aidlc-flow-slice
+---</code></pre>
+<p><code>contributions/construction/build-and-test.md</code>:</p>
+<pre><code class="language-markdown">---
+target: build-and-test
+plugin: flow-slice
+adds:
+  scopes:
+    - aidlc-flow-slice
+---</code></pre>
+<p>本文fragmentは追加しない。</p>
+<ul>
+<li>[ ] <strong>Step 4: stage経路テストを成功させる</strong></li>
+</ul>
+<p>Run: <code>/bin/sh tests/slice-routing-test.sh</code></p>
+<p>Expected: <code>PASS: slice-routing-test</code></p>
+<ul>
+<li>[ ] <strong>Step 5: コミットする</strong></li>
+</ul>
+<pre><code class="language-bash">git add tests/slice-routing-test.sh plugins/aidlc-flow-slice/contributions
+git commit -m &quot;feat: route slice scope through core build stages&quot;</code></pre>
+<h2>Task 3: AI-DLC v2.9.0の公式validatorと両projectionを契約テストにする</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>tests/plugin-build-test.sh</code></li>
+<li>Modify: <code>tests/testlib.sh</code></li>
+</ul>
+<ul>
+<li>[ ] <strong>Step 1: command有無を明確にskipではなく失敗させるassertionを追加する</strong></li>
+</ul>
+<pre><code class="language-sh">assert_command() {
+  command_name=$1
+  command -v &quot;$command_name&quot; &gt;/dev/null 2&gt;&amp;1 ||
+    fail &quot;required command is not installed: $command_name&quot;
+}</code></pre>
+<ul>
+<li>[ ] <strong>Step 2: 公式validator/buildを実行するテストを書く</strong></li>
+</ul>
+<pre><code class="language-sh">#!/bin/sh
+set -eu
+. &quot;$(dirname &quot;$0&quot;)/testlib.sh&quot;
+root=$(CDPATH= cd -- &quot;$(dirname &quot;$0&quot;)/..&quot; &amp;&amp; pwd)
+plugin=&quot;$root/plugins/aidlc-flow-slice&quot;
+tmp=$(new_tmpdir)
+trap 'rm -rf &quot;$tmp&quot;' EXIT HUP INT TERM
+assert_command aidlc
+
+aidlc plugin validate &quot;$plugin&quot;
+for harness in codex claude; do
+  out=&quot;$tmp/$harness&quot;
+  aidlc plugin build &quot;$harness&quot; &quot;$out&quot; --plugin-root &quot;$plugin&quot;
+  [ -f &quot;$out/.aidlc-plugin-projection.json&quot; ] || fail &quot;$harness projection metadata is missing&quot;
+  [ -f &quot;$out/scopes/aidlc-flow-slice.md&quot; ] || fail &quot;$harness scope projection is missing&quot;
+  [ -f &quot;$out/stages/inception/slice-contract.md&quot; ] || fail &quot;$harness contract stage is missing&quot;
+  [ -f &quot;$out/stages/construction/slice-review.md&quot; ] || fail &quot;$harness review stage is missing&quot;
+  [ -f &quot;$out/stages/construction/merge-readiness.md&quot; ] || fail &quot;$harness merge stage is missing&quot;
+done
+printf 'PASS: plugin-build-test\n'</code></pre>
+<ul>
+<li>[ ] <strong>Step 3: 両projectionの公式契約テストを実行する</strong></li>
+</ul>
+<p>Run: <code>/bin/sh tests/plugin-build-test.sh</code></p>
+<p>Expected: <code>Plugin validation: VALID</code>、Codex/Claude build成功、最後に <code>PASS: plugin-build-test</code></p>
+<ul>
+<li>[ ] <strong>Step 4: コミットする</strong></li>
+</ul>
+<pre><code class="language-bash">git add tests/testlib.sh tests/plugin-build-test.sh plugins/aidlc-flow-slice
+git commit -m &quot;test: validate slice plugin projections&quot;</code></pre>
+<h2>Task 4: v2.9.0固定とprojection配置をinstallerへ追加する</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>tests/version-test.sh</code></li>
+<li>Modify: <code>tests/install-test.sh</code></li>
+<li>Modify: <code>lib/common.sh</code></li>
+<li>Modify: <code>install.sh</code></li>
+</ul>
+<ul>
+<li>[ ] <strong>Step 1: 対応バージョンだけを許可する失敗テストを書く</strong></li>
+</ul>
+<p>テスト内に <code>aidlc --version</code> を返すfakeを作り、次の3ケースを検証する。</p>
+<pre><code class="language-sh">AIDLC_FAKE_VERSION='aidlc 2.9.0 (runtime 2.9.0)' require_aidlc_version
+assert_eq &quot;$?&quot; &quot;0&quot; &quot;2.9.0 is supported&quot;
+
+set +e
+unsupported=$(AIDLC_FAKE_VERSION='aidlc 2.10.0 (runtime 2.10.0)' require_aidlc_version 2&gt;&amp;1)
+status=$?
+set -e
+assert_eq &quot;$status&quot; &quot;1&quot; &quot;2.10.0 is rejected until verified&quot;
+assert_contains &quot;$unsupported&quot; 'requires aidlc 2.9.0' &quot;version mismatch is actionable&quot;</code></pre>
+<p>実際のテストではPATH上のfake <code>aidlc</code> を使い、関数内にテスト専用分岐を入れない。</p>
+<ul>
+<li>[ ] <strong>Step 2: version testを実行し未定義関数で失敗することを確認する</strong></li>
+</ul>
+<p>Run: <code>/bin/sh tests/version-test.sh</code></p>
+<p>Expected: <code>require_aidlc_version: not found</code></p>
+<ul>
+<li>[ ] <strong>Step 3: <code>require_aidlc_version</code> を実装する</strong></li>
+</ul>
+<pre><code class="language-sh">require_aidlc_version() {
+  aidlc_flow_version_output=$(aidlc --version 2&gt;&amp;1) ||
+    die 1 &quot;unable to read aidlc version&quot;
+  case &quot;$aidlc_flow_version_output&quot; in
+    'aidlc 2.9.0 (runtime 2.9.0)'*) ;;
+    *) die 1 &quot;slice workflow requires aidlc 2.9.0; found: $aidlc_flow_version_output&quot; ;;
+  esac
+}</code></pre>
+<ul>
+<li>[ ] <strong>Step 4: installer testへplugin sourceと両projectionの検査を追加する</strong></li>
+</ul>
+<p>fake <code>aidlc</code> は <code>plugin validate</code> と <code>plugin build</code> を記録し、build先へ <code>.aidlc-plugin-projection.json</code>、host manifest、scope、stageを作る。install後に次をassertする。</p>
+<pre><code class="language-sh">[ -f &quot;$tmp/share/aidlc-flow/plugins/aidlc-flow-slice/.aidlc-plugin/plugin.json&quot; ] || fail &quot;plugin source is not installed&quot;
+[ -f &quot;$tmp/share/aidlc-flow/plugin-dist/codex/.aidlc-plugin-projection.json&quot; ] || fail &quot;codex projection is not built&quot;
+[ -f &quot;$tmp/share/aidlc-flow/plugin-dist/claude/.aidlc-plugin-projection.json&quot; ] || fail &quot;claude projection is not built&quot;</code></pre>
+<ul>
+<li>[ ] <strong>Step 5: installerをplugin sourceのcopyと公式buildへ拡張する</strong></li>
+</ul>
+<p>既存のtransactional directory copy対象を次へ変える。</p>
+<pre><code class="language-sh">for directory in bin lib memory plugins; do
+  # 既存の .new → mv ロジックをそのまま使う
+done</code></pre>
+<p>copy完了後、<code>.new</code> build directoryへCodexとClaudeを生成し、両方成功した場合だけ <code>plugin-dist</code> と置き換える。途中失敗時は既存 <code>plugin-dist</code> を保持する。</p>
+<pre><code class="language-sh">aidlc plugin validate &quot;$destination/plugins/aidlc-flow-slice&quot;
+for harness in codex claude; do
+  aidlc plugin build &quot;$harness&quot; &quot;$destination/plugin-dist.new/$harness&quot; \
+    --plugin-root &quot;$destination/plugins/aidlc-flow-slice&quot;
+done</code></pre>
+<p>buildが生成する各host manifest directoryの <code>marketplace.json</code> は、catalog <code>name</code> だけを <code>aidlc-plugins</code> から専用名 <code>aidlc-flow</code> へ書き換える。plugin 名、version、sourceは変更しない。これにより他のAI-DLC plugin catalogと 名前が衝突しない。テストでは <code>name: aidlc-flow</code> と <code>plugins[0].name: aidlc-flow-slice</code> をassertする。</p>
+<ul>
+<li>[ ] <strong>Step 6: version・installerテストを成功させる</strong></li>
+</ul>
+<p>Run: <code>/bin/sh tests/version-test.sh &amp;&amp; /bin/sh tests/install-test.sh</code></p>
+<p>Expected: <code>PASS: version-test</code> と <code>PASS: install-test</code></p>
+<ul>
+<li>[ ] <strong>Step 7: コミットする</strong></li>
+</ul>
+<pre><code class="language-bash">git add lib/common.sh install.sh tests/version-test.sh tests/install-test.sh
+git commit -m &quot;feat: build supported slice plugin projections&quot;</code></pre>
+<h2>Task 5: ホストplugin導入と公式syncをTDDで実装する</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>lib/plugin.sh</code></li>
+<li>Create: <code>tests/plugin-install-test.sh</code></li>
+<li>Modify: <code>tests/bootstrap-test.sh</code></li>
+</ul>
+<ul>
+<li>[ ] <strong>Step 1: Codex/Claudeでの呼び出し順を記録するfakeテストを書く</strong></li>
+</ul>
+<p>テストは <code>codex</code>、<code>claude</code>、<code>aidlc</code> のfakeをPATHへ置き、<code>install_slice_plugin PROJECT HARNESS DIST</code> を呼ぶ。期待ログは次の順に固定する。</p>
+<pre><code class="language-text">codex|plugin marketplace add $projection_root/codex
+codex|plugin add aidlc-flow-slice@aidlc-flow
+aidlc|config project --project-dir $project --plugins flow-slice --yes
+aidlc|engine plugin sync</code></pre>
+<p>Claudeでは次を期待する。</p>
+<pre><code class="language-text">claude|plugin marketplace add $projection_root/claude --scope project
+claude|plugin install aidlc-flow-slice@aidlc-flow --scope project --yes
+aidlc|config project --project-dir $project --plugins flow-slice --yes
+aidlc|engine plugin sync</code></pre>
+<p>fakeはmarketplace/pluginが既に存在する2回目の呼び出しも成功させ、同じprojectionからの再実行が成功することを確認する。host CLIのstderrに「already configured」が出る場合だけ許容し、それ以外の非ゼロ終了は伝播させる。</p>
+<ul>
+<li>[ ] <strong>Step 2: テストを実行し、helper未作成で失敗することを確認する</strong></li>
+</ul>
+<p>Run: <code>/bin/sh tests/plugin-install-test.sh</code></p>
+<p>Expected: <code>lib/plugin.sh: No such file or directory</code></p>
+<ul>
+<li>[ ] <strong>Step 3: <code>lib/plugin.sh</code> を実装する</strong></li>
+</ul>
+<p>公開関数は次の3つに限定する。</p>
+<pre><code class="language-sh">slice_projection_dir() {
+  aidlc_flow_projection_root=$1
+  aidlc_flow_projection_harness=$2
+  printf '%s\n' &quot;$aidlc_flow_projection_root/$aidlc_flow_projection_harness&quot;
+}
+
+require_slice_projection() {
+  aidlc_flow_projection=$1
+  [ -f &quot;$aidlc_flow_projection/.aidlc-plugin-projection.json&quot; ] ||
+    die 1 &quot;slice plugin projection is missing; rerun install.sh&quot;
+}
+
+install_slice_plugin() {
+  aidlc_flow_plugin_project=$1
+  aidlc_flow_plugin_harness=$2
+  aidlc_flow_plugin_projection=$3
+  require_slice_projection &quot;$aidlc_flow_plugin_projection&quot;
+  case &quot;$aidlc_flow_plugin_harness&quot; in
+    codex)
+      codex plugin marketplace add &quot;$aidlc_flow_plugin_projection&quot;
+      codex plugin add aidlc-flow-slice@aidlc-flow
+      ;;
+    claude)
+      claude plugin marketplace add &quot;$aidlc_flow_plugin_projection&quot; --scope project
+      claude plugin install aidlc-flow-slice@aidlc-flow --scope project --yes
+      ;;
+    *) die 2 &quot;unsupported harness for slice plugin: $aidlc_flow_plugin_harness&quot; ;;
+  esac
+  (
+    cd &quot;$aidlc_flow_plugin_project&quot;
+    aidlc config project --project-dir &quot;$aidlc_flow_plugin_project&quot; --plugins flow-slice --yes
+    AIDLC_HARNESS_DIR=&quot;.$aidlc_flow_plugin_harness&quot; \
+      AIDLC_HARNESS_NAME=&quot;$aidlc_flow_plugin_harness&quot; \
+      aidlc engine plugin sync
+  )
+}</code></pre>
+<p>上のadd/installは、先にhost CLIのJSONを読むprivate helperで囲む。Codexは <code>codex plugin marketplace list --json</code> の <code>marketplaces[].name/root</code> と <code>codex plugin list --json</code> の <code>installed[].pluginId</code>、Claudeは <code>claude plugin marketplace list --json</code> の各要素の <code>name/path</code> と <code>claude plugin list --json</code> の <code>id/scope/projectPath</code> をPython標準JSONで読む。 <code>aidlc-flow</code> が同じprojection pathを指していればmarketplace addを省略し、 <code>aidlc-flow-slice@aidlc-flow</code> が対象scopeにあればplugin installを省略する。 同名marketplaceが異なるpathを指す場合は変更せず <code>aidlc-flow: marketplace aidlc-flow points to a different source</code> で停止する。</p>
+<ul>
+<li>[ ] <strong>Step 4: bootstrap fakeへplugin commandを追加する</strong></li>
+</ul>
+<p>既存fake <code>aidlc</code> に <code>--version</code>、<code>config project</code>、<code>engine plugin sync</code> を追加し、fake <code>codex</code> と <code>claude</code> を用意する。既存のcore config → plugin install/select/sync → Memory merge → doctorという順序をassertする。</p>
+<ul>
+<li>[ ] <strong>Step 5: plugin installとbootstrap回帰を成功させる</strong></li>
+</ul>
+<p>Run: <code>/bin/sh tests/plugin-install-test.sh &amp;&amp; /bin/sh tests/bootstrap-test.sh</code></p>
+<p>Expected: 両方PASS。host plugin、selection、syncのいずれかが失敗するケースではdoctorと成功表示へ進まない。</p>
+<ul>
+<li>[ ] <strong>Step 6: コミットする</strong></li>
+</ul>
+<pre><code class="language-bash">git add lib/plugin.sh tests/plugin-install-test.sh tests/bootstrap-test.sh
+git commit -m &quot;feat: install and compose slice plugin&quot;</code></pre>
+<h2>Task 6: <code>aidlc-flow init</code> に安全な順序で統合する</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Modify: <code>bin/aidlc-flow</code></li>
+<li>Modify: <code>lib/common.sh</code></li>
+<li>Modify: <code>lib/codex.sh</code></li>
+<li>Modify: <code>lib/claude.sh</code></li>
+<li>Modify: <code>tests/active-space-test.sh</code></li>
+<li>Modify: <code>tests/workflow-preflight-test.sh</code></li>
+<li>Modify: <code>tests/bootstrap-test.sh</code></li>
+</ul>
+<ul>
+<li>[ ] <strong>Step 1: active workflowと管理対象plugin手編集の失敗テストを書く</strong></li>
+</ul>
+<p>次を追加する。</p>
+<ul>
+<li>active intentがある場合、version確認後かつhost CLI呼び出し前に終了する。</li>
+<li>plugin ownership/drop記録が変更・degradedを示す場合、host plugin更新前に終了する。</li>
+<li>unrelated dirty fileは警告だけで続行する。</li>
+<li>managed Memoryの手編集は従来どおり拒否する。</li>
+</ul>
+<p>drop検査対象は両harness共通で、active space配下の <code>.aidlc-engine/hooks-health/plugin-compose-flow-slice.drops</code> とする。<code>[degraded]</code> が1件でもあれば停止し、<code>[advisory]</code> だけなら警告して続行する。</p>
+<ul>
+<li>[ ] <strong>Step 2: 新しいテストが現行順序で失敗することを確認する</strong></li>
+</ul>
+<p>Run: <code>/bin/sh tests/bootstrap-test.sh &amp;&amp; /bin/sh tests/workflow-preflight-test.sh</code></p>
+<p>Expected: plugin呼び出しまたはdrop診断の不足でFAIL</p>
+<ul>
+<li>[ ] <strong>Step 3: init処理を次の順序へ変更する</strong></li>
+</ul>
+<pre><code class="language-sh">require_aidlc
+require_aidlc_version
+require_git_repo &quot;$project_dir&quot;
+refuse_base_path_symlinks &quot;$project_dir&quot;
+space=$(active_space &quot;$project_dir&quot;)
+refuse_managed_path_symlinks &quot;$project_dir&quot; &quot;$space&quot;
+refuse_active_workflow &quot;$project_dir&quot;
+refuse_dirty_managed_memory &quot;$project_dir&quot; &quot;$space&quot; &quot;$root/memory/team.md&quot; &quot;$root/memory/phases/construction.md&quot;
+refuse_degraded_plugin_state &quot;$project_dir&quot; &quot;$space&quot;
+
+. &quot;$root/lib/$harness.sh&quot;
+. &quot;$root/lib/plugin.sh&quot;
+configure_harness &quot;$project_dir&quot;
+install_slice_plugin &quot;$project_dir&quot; &quot;$harness&quot; &quot;$root/plugin-dist/$harness&quot;
+# symlink再検査、Memory merge、doctor、完了表示は既存順序を維持</code></pre>
+<ul>
+<li>[ ] <strong>Step 4: 開始ヒントをslice runnerへ変更する</strong></li>
+</ul>
+<p>Codex:</p>
+<pre><code class="language-text">Start Codex in this repository, approve the hook trust prompt, then invoke $aidlc-flow-slice &lt;your slice&gt;.</code></pre>
+<p>Claude:</p>
+<pre><code class="language-text">Start Claude Code in this repository, approve project hooks, then invoke /aidlc-flow-slice &lt;your slice&gt;.</code></pre>
+<ul>
+<li>[ ] <strong>Step 5: preflightとbootstrapを成功させる</strong></li>
+</ul>
+<p>Run: <code>/bin/sh tests/workflow-preflight-test.sh &amp;&amp; /bin/sh tests/bootstrap-test.sh</code></p>
+<p>Expected: 両方PASS。2回目のinitは管理対象ファイルを変えず成功する。</p>
+<ul>
+<li>[ ] <strong>Step 6: コミットする</strong></li>
+</ul>
+<pre><code class="language-bash">git add bin/aidlc-flow lib/common.sh lib/codex.sh lib/claude.sh tests/active-space-test.sh tests/workflow-preflight-test.sh tests/bootstrap-test.sh
+git commit -m &quot;feat: initialize repositories with slice workflow&quot;</code></pre>
+<h2>Task 7: 実projectionで経路とdoctorを統合検証する</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Modify: <code>tests/plugin-build-test.sh</code></li>
+<li>Create: <code>tests/plugin-integration-test.sh</code></li>
+</ul>
+<ul>
+<li>[ ] <strong>Step 1: disposable projectでの統合失敗テストを書く</strong></li>
+</ul>
+<p>テストは一時Gitリポジトリを作り、実 <code>aidlc 2.9.0</code> でCodexとClaudeを別々に初期化する。生成済みprojectionをローカルmarketplaceとして導入し、次を検証する。</p>
+<pre><code class="language-sh">aidlc engine graph validate-scope aidlc-flow-slice
+aidlc engine gen scope-table
+aidlc doctor --project-dir &quot;$project&quot; --quiet</code></pre>
+<p>scope tableから次の順序をassertする。</p>
+<pre><code class="language-text">workspace-scaffold
+workspace-detection
+state-init
+slice-contract
+code-generation
+build-and-test
+slice-review
+merge-readiness</code></pre>
+<p>また <code>units-generation</code>、<code>delivery-planning</code>、<code>domain-design</code> がslice scopeでSKIP、code-generationのeffective reviewが<code>none</code>、slice-reviewがEXECUTEであることをassertする。</p>
+<ul>
+<li>[ ] <strong>Step 2: 隔離したhost設定で統合テストを実行する</strong></li>
+</ul>
+<p>テスト実行中は <code>CODEX_HOME=&quot;$tmp/codex-home&quot;</code> と <code>CLAUDE_CONFIG_DIR=&quot;$tmp/claude-home&quot;</code> を設定し、利用者の実host plugin設定を 読み書きしない。marketplace sourceはローカルprojectionだけを使い、ネットワーク アクセスを行わない。</p>
+<p>Run: <code>/bin/sh tests/plugin-integration-test.sh</code></p>
+<p>Expected: Codex/Claude双方でscope validationとdoctorが成功し、 <code>PASS: plugin-integration-test</code></p>
+<ul>
+<li>[ ] <strong>Step 3: plugin build契約も続けて成功させる</strong></li>
+</ul>
+<p>Run: <code>/bin/sh tests/plugin-build-test.sh &amp;&amp; /bin/sh tests/plugin-integration-test.sh</code></p>
+<p>Expected: Codex/Claude双方でscope validationとdoctorが成功し、<code>PASS: plugin-integration-test</code></p>
+<ul>
+<li>[ ] <strong>Step 4: コミットする</strong></li>
+</ul>
+<pre><code class="language-bash">git add plugins/aidlc-flow-slice lib/plugin.sh tests/plugin-build-test.sh tests/plugin-integration-test.sh
+git commit -m &quot;test: verify slice workflow integration&quot;</code></pre>
+<h2>Task 8: 利用方法と測定方法を文書化し、全検査を通す</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Modify: <code>README.md</code></li>
+<li>Modify: <code>tests/cli-test.sh</code></li>
+</ul>
+<ul>
+<li>[ ] <strong>Step 1: READMEの必須情報を検査する失敗テストを書く</strong></li>
+</ul>
+<pre><code class="language-sh">readme=$(cat &quot;$repo_root/README.md&quot;)
+assert_contains &quot;$readme&quot; '$aidlc-flow-slice &lt;slice&gt;' &quot;Codex slice entry is documented&quot;
+assert_contains &quot;$readme&quot; '/aidlc-flow-slice &lt;slice&gt;' &quot;Claude slice entry is documented&quot;
+assert_contains &quot;$readme&quot; 'AI-DLC v2.9.0' &quot;supported version is documented&quot;
+assert_contains &quot;$readme&quot; '1 intent、1ブランチ、1 PR' &quot;slice boundary is documented&quot;
+assert_contains &quot;$readme&quot; 'push、PR作成、mainへのマージ' &quot;external approvals are documented&quot;
+assert_contains &quot;$readme&quot; '経過時間' &quot;comparison measurement is documented&quot;</code></pre>
+<ul>
+<li>[ ] <strong>Step 2: testを実行し、README未更新で失敗することを確認する</strong></li>
+</ul>
+<p>Run: <code>/bin/sh tests/cli-test.sh</code></p>
+<p>Expected: <code>FAIL: Codex slice entry is documented</code></p>
+<ul>
+<li>[ ] <strong>Step 3: READMEを更新する</strong></li>
+</ul>
+<p>次の内容を短く記載する。</p>
+<ul>
+<li>prerequisiteをAI-DLC v2.9.0へ固定。</li>
+<li><code>install.sh</code> がslice pluginのCodex/Claude projectionも生成する。</li>
+<li><code>aidlc-flow init --harness ...</code> 後の入口。</li>
+<li>1 intent、1ブランチ、1 PRであること。</li>
+<li>feature flagは既定で要求せず、安全にmainへ入らない場合だけ確認すること。</li>
+<li>push、PR作成、mainへのマージは個別承認、deployは対象外であること。</li>
+<li>経過時間、実作業時間、承認回数、差し戻し、token/cost、変更量、不具合発見段階、未検証事項を記録すること。</li>
+<li>AI-DLCなしのcodex-phase比較でも同じ測定項目を使うこと。</li>
+</ul>
+<ul>
+<li>[ ] <strong>Step 4: 全検査を実行する</strong></li>
+</ul>
+<p>Run: <code>make check</code></p>
+<p>Expected: 既存テストと追加テストがすべて <code>PASS</code>、shell syntax check成功</p>
+<ul>
+<li>[ ] <strong>Step 5: working treeと差分を検査する</strong></li>
+</ul>
+<p>Run: <code>git diff --check &amp;&amp; git status --short</code></p>
+<p>Expected: whitespace errorなし。Task 8のREADMEとtestだけが未コミット。</p>
+<ul>
+<li>[ ] <strong>Step 6: コミットする</strong></li>
+</ul>
+<pre><code class="language-bash">git add README.md tests/cli-test.sh
+git commit -m &quot;docs: explain vertical slice workflow&quot;</code></pre>
+<ul>
+<li>[ ] <strong>Step 7: コミット後の最終証拠を取得する</strong></li>
+</ul>
+<p>Run: <code>make check &amp;&amp; git status --short --branch &amp;&amp; git log -8 --oneline</code></p>
+<p>Expected: 全検査PASS、作業ツリーclean、Task 1〜8の1意図ごとのコミットが表示される。push、PR作成、mainへのマージ、deployは実行しない。</p></main></body>
+</html>
