@@ -12,6 +12,8 @@ done
 self_dir=$(CDPATH= cd -- "$(dirname "$self_path")" && pwd)
 root=$(CDPATH= cd -- "$self_dir/.." && pwd)
 . "$root/lib/common.sh"
+. "$root/lib/aidlc-plugin-tools.sh"
+. "$root/lib/plugin.sh"
 
 usage() {
   printf '%s\n' 'Usage: aidlc-flow init --harness codex|claude [--project-dir PATH]' >&2
@@ -46,13 +48,15 @@ case "$harness" in
 esac
 
 project_dir=$(CDPATH= cd -- "$project_dir" 2>/dev/null && pwd -P) || die 2 "project directory does not exist"
-require_git_repo "$project_dir"
 require_aidlc
+require_aidlc_plugin_version
+require_git_repo "$project_dir"
 refuse_base_path_symlinks "$project_dir"
 space=$(active_space "$project_dir")
 refuse_managed_path_symlinks "$project_dir" "$space"
 refuse_active_workflow "$project_dir"
 refuse_dirty_managed_memory "$project_dir" "$space" "$root/memory/team.md" "$root/memory/phases/construction.md"
+refuse_dirty_managed_plugin "$project_dir" "$harness"
 
 dirty=$(git -C "$project_dir" status --short)
 if [ -n "$dirty" ]; then
@@ -62,9 +66,12 @@ fi
 
 . "$root/lib/$harness.sh"
 configure_harness "$project_dir"
+plugin_dist=${AIDLC_FLOW_PLUGIN_DIST:-"$root/plugin-dist"}
+install_flow_plugin "$project_dir" "$harness" "$plugin_dist/$harness"
 refuse_base_path_symlinks "$project_dir"
 space=$(active_space "$project_dir")
 refuse_managed_path_symlinks "$project_dir" "$space"
+refuse_dirty_managed_plugin "$project_dir" "$harness"
 memory_root="$project_dir/aidlc/spaces/$space/memory"
 merge_managed_block "$memory_root/team.md" "$root/memory/team.md" team || die 1 "failed to update managed memory: $memory_root/team.md"
 merge_managed_block "$memory_root/phases/construction.md" "$root/memory/phases/construction.md" construction || die 1 "failed to update managed memory: $memory_root/phases/construction.md"

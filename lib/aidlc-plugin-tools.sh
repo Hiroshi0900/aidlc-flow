@@ -5,6 +5,18 @@ plugin_toolchain_die() {
   return 1
 }
 
+require_aidlc_plugin_version() {
+  aidlc_flow_required_version=2.9.0
+  aidlc_flow_reported_version=$(aidlc --version 2>/dev/null) ||
+    plugin_toolchain_die "unable to read AI-DLC version" || return
+  case "$aidlc_flow_reported_version" in
+    "aidlc $aidlc_flow_required_version (runtime $aidlc_flow_required_version)"*) ;;
+    *)
+      plugin_toolchain_die "AI-DLC $aidlc_flow_required_version is required; found: $aidlc_flow_reported_version" || return
+      ;;
+  esac
+}
+
 require_plugin_toolchain() {
   if [ -n "${AIDLC_FLOW_BUN:-}" ]; then
     aidlc_flow_bun=$AIDLC_FLOW_BUN
