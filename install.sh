@@ -28,6 +28,10 @@ command_path="$bin_home/aidlc-flow"
   printf 'aidlc-flow: install destination must not be a symbolic link: %s\n' "$destination" >&2
   exit 1
 }
+if [ -e "$destination" ] && [ ! -d "$destination" ]; then
+  printf 'aidlc-flow: install destination is not a directory: %s\n' "$destination" >&2
+  exit 1
+fi
 if [ -d "$command_path" ] && [ ! -L "$command_path" ]; then
   printf 'aidlc-flow: command path is a directory: %s\n' "$command_path" >&2
   exit 1
@@ -36,11 +40,32 @@ elif [ -e "$command_path" ] && [ ! -L "$command_path" ]; then
   exit 1
 fi
 
-require_plugin_toolchain
+validate_existing_destination() {
+  [ -d "$destination" ] || return 0
+  install_marker="$destination/.aidlc-flow-install"
+  if [ -e "$install_marker" ] || [ -L "$install_marker" ]; then
+    if [ ! -f "$install_marker" ] || [ -L "$install_marker" ] ||
+      [ "$(cat "$install_marker"; printf x)" != "$(printf 'schema=1\nowner=aidlc-flow\nx')" ]; then
+      printf 'aidlc-flow: existing install marker is invalid: %s\n' "$install_marker" >&2
+      return 1
+    fi
+  elif [ ! -f "$destination/bin/aidlc-flow" ] || [ -L "$destination/bin/aidlc-flow" ] ||
+    [ ! -d "$destination/lib" ] || [ -L "$destination/lib" ] ||
+    [ ! -d "$destination/memory" ] || [ -L "$destination/memory" ]; then
+    printf 'aidlc-flow: existing install destination is not owned by aidlc-flow: %s\n' \
+      "$destination" >&2
+    return 1
+  fi
+}
 
-mkdir -p "$data_home" "$bin_home"
-staging="$data_home/aidlc-flow.new"
-backup="$data_home/aidlc-flow.old"
+validate_existing_destination
+
+mkdir -p "$data_home"
+lock_path="$data_home/.aidlc-flow-install.lock"
+lock_owned=false
+staging=
+backup_root=
+backup=
 destination_had_previous=false
 destination_swap_started=false
 command_had_previous=false
@@ -74,9 +99,19 @@ rollback_install() {
     fi
   fi
 
-  rm -rf "$staging"
+  if [ -n "$staging" ]; then
+    rm -rf "$staging"
+  fi
   if [ "$install_committed" = true ]; then
-    rm -rf "$backup"
+    if [ -n "$backup_root" ]; then
+      rm -rf "$backup_root"
+    fi
+  elif [ -n "$backup_root" ] && [ ! -e "$backup" ]; then
+    rmdir "$backup_root" 2>/dev/null
+  fi
+  if [ "$lock_owned" = true ]; then
+    rmdir "$lock_path" 2>/dev/null
+    lock_owned=false
   fi
   [ "$rollback_status" -ne 0 ] || rollback_status=1
   exit "$rollback_status"
@@ -87,12 +122,34 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-[ ! -e "$backup" ] && [ ! -L "$backup" ] || {
-  printf 'aidlc-flow: install backup path already exists: %s\n' "$backup" >&2
+if mkdir "$lock_path" 2>/dev/null; then
+  lock_owned=true
+else
+  printf 'aidlc-flow: installation is already in progress; if no installer is running, inspect lock: %s\n' \
+    "$lock_path" >&2
+  exit 1
+fi
+
+validate_existing_destination
+require_plugin_toolchain
+mkdir -p "$bin_home"
+
+staging=$(mktemp -d "$data_home/.aidlc-flow.new.XXXXXX") || {
+  printf 'aidlc-flow: unable to create install staging directory\n' >&2
   exit 1
 }
-rm -rf "$staging"
-mkdir -p "$staging"
+backup_root=$(mktemp -d "$data_home/.aidlc-flow.backup.XXXXXX") || {
+  printf 'aidlc-flow: unable to create install backup directory\n' >&2
+  exit 1
+}
+backup="$backup_root/aidlc-flow"
+if [ -d "$destination" ]; then
+  cp -R "$destination/." "$staging/"
+fi
+for directory in bin lib memory plugins plugin-dist; do
+  rm -rf "$staging/$directory"
+done
+printf 'schema=1\nowner=aidlc-flow\n' >"$staging/.aidlc-flow-install"
 for directory in bin lib memory plugins; do
   mkdir -p "$staging/$directory"
   cp -R "$root/$directory/." "$staging/$directory/"
@@ -126,6 +183,8 @@ mv "$staging" "$destination"
 command_update_attempted=true
 ln -sfn "$destination/bin/aidlc-flow" "$command_path"
 install_committed=true
-rm -rf "$backup"
+rm -rf "$backup_root"
+rmdir "$lock_path"
+lock_owned=false
 trap - EXIT HUP INT TERM
 printf 'Installed aidlc-flow at %s\n' "$command_path"
