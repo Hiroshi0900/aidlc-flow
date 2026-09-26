@@ -85,3 +85,67 @@ build_flow_projection() {
   "$aidlc_flow_bun" "$aidlc_flow_tools/aidlc-plugin-build.ts" \
     "$aidlc_flow_plugin_root" "$aidlc_flow_harness" "$aidlc_flow_output_dir"
 }
+
+build_codex_marketplace_adapter() {
+  aidlc_flow_codex_projection=$1
+  aidlc_flow_codex_manifest_dir="$aidlc_flow_codex_projection/.codex-plugin"
+  aidlc_flow_codex_adapter_dir="$aidlc_flow_codex_projection/.agents/plugins"
+  [ -d "$aidlc_flow_codex_projection" ] && [ ! -L "$aidlc_flow_codex_projection" ] ||
+    plugin_toolchain_die "Codex projection root is missing or unsafe: $aidlc_flow_codex_projection" || return
+  for aidlc_flow_codex_manifest in plugin.json marketplace.json; do
+    [ -f "$aidlc_flow_codex_manifest_dir/$aidlc_flow_codex_manifest" ] &&
+      [ ! -L "$aidlc_flow_codex_manifest_dir/$aidlc_flow_codex_manifest" ] ||
+      plugin_toolchain_die "official Codex manifest is missing or unsafe: $aidlc_flow_codex_manifest_dir/$aidlc_flow_codex_manifest" || return
+  done
+  [ ! -e "$aidlc_flow_codex_projection/.agents" ] ||
+    plugin_toolchain_die "Codex marketplace adapter path already exists: $aidlc_flow_codex_projection/.agents" || return
+  mkdir -p "$aidlc_flow_codex_adapter_dir" || return
+  python3 - \
+    "$aidlc_flow_codex_manifest_dir/plugin.json" \
+    "$aidlc_flow_codex_manifest_dir/marketplace.json" \
+    "$aidlc_flow_codex_adapter_dir/marketplace.json" <<'PY'
+import json
+import os
+import sys
+
+plugin_path, marketplace_path, output_path = sys.argv[1:]
+with open(plugin_path, encoding="utf-8") as source:
+    plugin = json.load(source)
+with open(marketplace_path, encoding="utf-8") as source:
+    marketplace = json.load(source)
+entries = marketplace.get("plugins") if isinstance(marketplace, dict) else None
+if not isinstance(plugin, dict) or not isinstance(entries, list) or len(entries) != 1:
+    raise SystemExit("official Codex manifests do not describe exactly one plugin")
+entry = entries[0]
+if not isinstance(entry, dict):
+    raise SystemExit("official Codex marketplace plugin entry is invalid")
+name = plugin.get("name")
+version = plugin.get("version")
+if (
+    marketplace.get("name") != "aidlc-plugins"
+    or name != "aidlc-flow"
+    or entry.get("name") != name
+    or entry.get("source") != "."
+    or entry.get("version") != version
+):
+    raise SystemExit("official Codex marketplace and plugin manifests disagree")
+adapter = {
+    "name": marketplace["name"],
+    "plugins": [
+        {
+            "name": name,
+            "source": {"source": "local", "path": "./"},
+            "policy": {
+                "installation": "AVAILABLE",
+                "authentication": "ON_USE",
+            },
+        }
+    ],
+}
+temporary = output_path + ".tmp"
+with open(temporary, "w", encoding="utf-8") as destination:
+    json.dump(adapter, destination, indent=2, ensure_ascii=False)
+    destination.write("\n")
+os.replace(temporary, output_path)
+PY
+}

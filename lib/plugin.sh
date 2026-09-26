@@ -32,6 +32,11 @@ validate_flow_projection() {
     [ -f "$aidlc_flow_projection_file" ] && [ ! -L "$aidlc_flow_projection_file" ] ||
       plugin_install_die "plugin projection file is missing or unsafe: $aidlc_flow_projection_file" || return
   done
+  if [ "$aidlc_flow_projection_harness" = codex ]; then
+    aidlc_flow_codex_adapter="$aidlc_flow_projection/.agents/plugins/marketplace.json"
+    [ -f "$aidlc_flow_codex_adapter" ] && [ ! -L "$aidlc_flow_codex_adapter" ] ||
+      plugin_install_die "Codex marketplace adapter is missing or unsafe: $aidlc_flow_codex_adapter" || return
+  fi
   if [ -n "$(find "$aidlc_flow_projection" -type l -print -quit 2>/dev/null)" ]; then
     plugin_install_die "symbolic link is not allowed in plugin projection: $aidlc_flow_projection" || return
   fi
@@ -63,6 +68,21 @@ if not isinstance(entry, dict) or entry.get("name") != "aidlc-flow" or entry.get
     raise SystemExit("invalid marketplace plugin entry")
 if entry.get("version") != plugin.get("version"):
     raise SystemExit("plugin version mismatch")
+if harness == "codex":
+    with open(os.path.join(root, ".agents", "plugins", "marketplace.json"), encoding="utf-8") as source:
+        adapter = json.load(source)
+    expected_adapter = {
+        "name": "aidlc-plugins",
+        "plugins": [
+            {
+                "name": "aidlc-flow",
+                "source": {"source": "local", "path": "./"},
+                "policy": {"installation": "AVAILABLE", "authentication": "ON_USE"},
+            }
+        ],
+    }
+    if adapter != expected_adapter:
+        raise SystemExit("invalid Codex marketplace adapter")
 PY
   then
     plugin_install_die "plugin projection metadata is invalid: $aidlc_flow_projection" || return

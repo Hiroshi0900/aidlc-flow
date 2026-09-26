@@ -32,6 +32,10 @@ for fixture_harness in codex claude; do
   printf '%s\n' '{"name":"aidlc-flow","version":"0.1.0"}' > "$fixture/.$fixture_harness-plugin/plugin.json"
   printf '%s\n' '{"name":"aidlc-plugins","plugins":[{"name":"aidlc-flow","source":".","version":"0.1.0"}]}' > "$fixture/.$fixture_harness-plugin/marketplace.json"
   printf '%s\n' 'export async function compose() {}' > "$fixture/hooks/compose.ts"
+  if [ "$fixture_harness" = codex ]; then
+    mkdir -p "$fixture/.agents/plugins"
+    printf '%s\n' '{"name":"aidlc-plugins","plugins":[{"name":"aidlc-flow","source":{"source":"local","path":"./"},"policy":{"installation":"AVAILABLE","authentication":"ON_USE"}}]}' > "$fixture/.agents/plugins/marketplace.json"
+  fi
 done
 
 cat > "$fake_bin/codex" <<'SH'

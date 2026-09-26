@@ -20,6 +20,10 @@ make_projection() {
   printf '%s\n' '{"name":"aidlc-flow","version":"0.1.0"}' > "$fixture/.$fixture_harness-plugin/plugin.json"
   printf '%s\n' '{"name":"aidlc-plugins","plugins":[{"name":"aidlc-flow","source":".","version":"0.1.0"}]}' > "$fixture/.$fixture_harness-plugin/marketplace.json"
   printf '%s\n' 'export async function compose() {}' > "$fixture/hooks/compose.ts"
+  if [ "$fixture_harness" = codex ]; then
+    mkdir -p "$fixture/.agents/plugins"
+    printf '%s\n' '{"name":"aidlc-plugins","plugins":[{"name":"aidlc-flow","source":{"source":"local","path":"./"},"policy":{"installation":"AVAILABLE","authentication":"ON_USE"}}]}' > "$fixture/.agents/plugins/marketplace.json"
+  fi
 }
 make_projection codex
 make_projection claude
@@ -68,6 +72,17 @@ export PATH
 
 [ -f "$root/lib/plugin.sh" ] || fail "plugin install helper exists"
 . "$root/lib/plugin.sh"
+
+: > "$HOST_FAKE_LOG"
+cp -R "$projection_root/codex" "$projection_root/codex-missing-adapter"
+rm -rf "$projection_root/codex-missing-adapter/.agents"
+set +e
+missing_adapter_output=$(install_flow_plugin "$project" codex "$projection_root/codex-missing-adapter" 2>&1)
+missing_adapter_status=$?
+set -e
+assert_eq "$missing_adapter_status" 1 "Codex projection without host marketplace adapter is rejected"
+assert_contains "$missing_adapter_output" "marketplace adapter" "missing Codex adapter has a diagnostic"
+assert_eq "$(cat "$HOST_FAKE_LOG")" "" "missing Codex adapter stops before host CLI"
 
 : > "$HOST_FAKE_LOG"
 install_flow_plugin "$project" codex "$projection_root/codex"

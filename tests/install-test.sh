@@ -34,8 +34,10 @@ case "${tool##*/}" in
     [ -f "$plugin_root/.aidlc-plugin/plugin.json" ] || exit 73
     [ "$harness" = codex ] || [ "$harness" = claude ] || exit 74
     [ "${AIDLC_FLOW_FAKE_FAIL_HARNESS:-}" != "$harness" ] || exit 75
-    mkdir -p "$output_dir"
+    mkdir -p "$output_dir/.$harness-plugin"
     printf '%s\n' "$harness" >"$output_dir/fake-projection"
+    printf '%s\n' '{"name":"aidlc-flow","version":"0.1.0"}' >"$output_dir/.$harness-plugin/plugin.json"
+    printf '%s\n' '{"name":"aidlc-plugins","plugins":[{"name":"aidlc-flow","source":".","version":"0.1.0"}]}' >"$output_dir/.$harness-plugin/marketplace.json"
     ;;
   *) exit 76 ;;
 esac

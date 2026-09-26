@@ -169,6 +169,12 @@ for harness in codex claude; do
     printf 'aidlc-flow: failed to build %s plugin projection\n' "$harness" >&2
     exit 1
   }
+  if [ "$harness" = codex ]; then
+    build_codex_marketplace_adapter "$staging/plugin-dist/$harness" || {
+      printf 'aidlc-flow: failed to build Codex marketplace adapter\n' >&2
+      exit 1
+    }
+  fi
 done
 chmod +x "$staging/bin/aidlc-flow"
 
