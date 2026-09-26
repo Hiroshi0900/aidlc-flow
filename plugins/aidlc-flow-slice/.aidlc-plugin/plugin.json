@@ -1,0 +1,14 @@
+{
+  "name": "flow-slice",
+  "version": "0.1.0",
+  "description": "A fast vertical slice from acceptance contract through review and merge readiness.",
+  "author": { "name": "aidlc-flow" },
+  "dependencies": ["core"],
+  "aidlc": {
+    "contributes": {
+      "stages": "stages/",
+      "scopes": "scopes/",
+      "contributions": "contributions/"
+    }
+  }
+}
