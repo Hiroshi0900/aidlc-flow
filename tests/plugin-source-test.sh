@@ -3,6 +3,7 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$SCRIPT_DIR/testlib.sh"
+. "$SCRIPT_DIR/plugin-testlib.sh"
 
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 PLUGIN_ROOT=${PLUGIN_ROOT_OVERRIDE:-"$REPO_ROOT/plugins/flow"}
@@ -25,100 +26,95 @@ do
   [ -f "$PLUGIN_ROOT/$source_file" ] || fail "missing plugin source: $source_file"
 done
 
-manifest=$(cat "$PLUGIN_ROOT/.aidlc-plugin/plugin.json")
-assert_contains "$manifest" '"name": "flow"' "manifest name matches root"
-assert_contains "$manifest" '"version": "0.1.0"' "manifest version"
-assert_contains "$manifest" '"description": "Deliver one vertical slice through test, review, and merge readiness."' "manifest description"
-assert_contains "$manifest" '"author": { "name": "aidlc-flow" }' "manifest author"
-assert_contains "$manifest" '"dependencies": ["core"]' "manifest core dependency"
-assert_contains "$manifest" '"stages": "stages/"' "manifest stage path"
-assert_contains "$manifest" '"scopes": "scopes/"' "manifest scope path"
-assert_contains "$manifest" '"overlays": "contributions/"' "manifest uses official overlay key"
-case "$manifest" in
-  *'"contributions"'*) fail "manifest must not use unsupported contributions key" ;;
-esac
+python3 - "$PLUGIN_ROOT/.aidlc-plugin/plugin.json" <<'PY' || fail "plugin manifest must exactly match the official contract"
+import json
+import sys
 
-scope=$(cat "$PLUGIN_ROOT/scopes/flow-slice.md")
-assert_contains "$scope" 'name: flow-slice' "scope uses plugin prefix"
-assert_contains "$scope" 'plugin: flow' "scope owner"
-assert_contains "$scope" 'depth: Minimal' "scope"
-assert_contains "$scope" 'testStrategy: Standard' "scope"
-assert_contains "$scope" 'runner: true' "scope"
-assert_contains "$scope" 'review_cap: none' "scope"
-assert_contains "$scope" 'change_control: relaxed' "scope"
-assert_contains "$scope" 'sensors: on' "scope"
-assert_contains "$scope" 'learnings: off' "scope"
-assert_contains "$scope" 'summary_confirmation: off' "scope"
-grep -q '^name: flow-slice$' "$PLUGIN_ROOT/scopes/flow-slice.md" || fail "scope name must equal filename stem"
-grep -q '^plugin: flow$' "$PLUGIN_ROOT/scopes/flow-slice.md" || fail "scope owner must equal manifest name"
-for policy in \
-  'depth: Minimal' \
-  'testStrategy: Standard' \
-  'runner: true' \
-  'review_cap: none' \
-  'change_control: relaxed' \
-  'sensors: on' \
-  'learnings: off' \
-  'summary_confirmation: off'
-do
-  grep -q "^$policy$" "$PLUGIN_ROOT/scopes/flow-slice.md" || fail "scope policy must be exact: $policy"
-done
+expected = {
+    "name": "flow",
+    "version": "0.1.0",
+    "description": "Deliver one vertical slice through test, review, and merge readiness.",
+    "author": {"name": "aidlc-flow"},
+    "dependencies": ["core"],
+    "aidlc": {
+        "contributes": {
+            "stages": "stages/",
+            "scopes": "scopes/",
+            "overlays": "contributions/",
+        }
+    },
+}
+
+with open(sys.argv[1], encoding="utf-8") as manifest_file:
+    actual = json.load(manifest_file)
+
+if not isinstance(actual, dict) or actual != expected:
+    raise SystemExit("manifest content differs from expected contract")
+PY
+
+scope_frontmatter=$(plugin_frontmatter "$PLUGIN_ROOT/scopes/flow-slice.md") || fail "scope must have closed YAML frontmatter"
+assert_eq "$(plugin_yaml_scalar "$scope_frontmatter" name)" flow-slice "scope name must equal filename stem"
+assert_eq "$(plugin_yaml_scalar "$scope_frontmatter" plugin)" flow "scope owner must equal manifest name"
+assert_eq "$(plugin_yaml_scalar "$scope_frontmatter" depth)" Minimal "scope depth"
+assert_eq "$(plugin_yaml_scalar "$scope_frontmatter" testStrategy)" Standard "scope test strategy"
+assert_eq "$(plugin_yaml_scalar "$scope_frontmatter" runner)" true "scope runner"
+assert_eq "$(plugin_yaml_scalar "$scope_frontmatter" review_cap)" none "scope review cap"
+assert_eq "$(plugin_yaml_scalar "$scope_frontmatter" change_control)" relaxed "scope change control"
+assert_eq "$(plugin_yaml_scalar "$scope_frontmatter" sensors)" on "scope sensors"
+assert_eq "$(plugin_yaml_scalar "$scope_frontmatter" learnings)" off "scope learnings"
+assert_eq "$(plugin_yaml_scalar "$scope_frontmatter" summary_confirmation)" off "scope summary confirmation"
 
 assert_stage() {
   relative_path=$1
   expected_slug=$2
-  expected_artifact=$3
-  stage=$(cat "$PLUGIN_ROOT/$relative_path")
-  assert_contains "$stage" "slug: $expected_slug" "stage slug: $relative_path"
-  assert_contains "$stage" 'plugin: flow' "stage owner: $relative_path"
-  assert_contains "$stage" "  - $expected_artifact" "stage artifact namespace: $relative_path"
-  assert_contains "$stage" '  - flow-slice' "stage scope: $relative_path"
+  expected_artifacts=$3
+  stage_frontmatter=$(plugin_frontmatter "$PLUGIN_ROOT/$relative_path") || fail "stage must have closed YAML frontmatter: $relative_path"
+  assert_eq "$(plugin_yaml_scalar "$stage_frontmatter" slug)" "$expected_slug" "stage slug: $relative_path"
+  assert_eq "$(plugin_yaml_scalar "$stage_frontmatter" plugin)" flow "stage owner: $relative_path"
+  assert_eq "$(plugin_yaml_list "$stage_frontmatter" produces)" "$expected_artifacts" "stage artifacts: $relative_path"
+  assert_eq "$(plugin_yaml_list "$stage_frontmatter" scopes)" flow-slice "stage scope: $relative_path"
 }
 
-assert_stage stages/inception/flow-slice-contract.md flow-slice-contract flow-slice-contract
+assert_stage stages/inception/flow-slice-contract.md flow-slice-contract 'flow-requirements
+flow-slice-contract'
 assert_stage stages/construction/flow-slice-review.md flow-slice-review flow-slice-review
 assert_stage stages/construction/flow-merge-readiness.md flow-merge-readiness flow-merge-readiness
 
 find "$PLUGIN_ROOT/stages" -type f -name '*.md' -print | while IFS= read -r stage_file; do
   stage_slug=${stage_file##*/}
   stage_slug=${stage_slug%.md}
-  grep -q "^slug: $stage_slug$" "$stage_file" || fail "stage slug must equal filename: $stage_file"
-  grep -q '^plugin: flow$' "$stage_file" || fail "stage owner must equal manifest name: $stage_file"
-  awk '
-    $0 == "---" { delimiter++; if (delimiter == 2) exit; next }
-    delimiter == 1 && ($0 == "produces:" || $0 == "optional_produces:") {
-      in_produces = 1
-      next
-    }
-    delimiter == 1 && in_produces && /^  - / {
-      artifact = $0
-      sub(/^  - /, "", artifact)
-      if (artifact !~ /^flow-/) exit 1
-      next
-    }
-    delimiter == 1 && in_produces { in_produces = 0 }
-  ' "$stage_file" || fail "produced artifact must use flow- namespace: $stage_file"
+  stage_frontmatter=$(plugin_frontmatter "$stage_file") || fail "stage must have closed YAML frontmatter: $stage_file"
+  assert_eq "$(plugin_yaml_scalar "$stage_frontmatter" slug)" "$stage_slug" "stage slug must equal filename"
+  assert_eq "$(plugin_yaml_scalar "$stage_frontmatter" plugin)" flow "stage owner must equal manifest name"
+  produced=$(plugin_yaml_list "$stage_frontmatter" produces)
+  optional_produced=$(plugin_yaml_list "$stage_frontmatter" optional_produces)
+  [ -n "$produced" ] || fail "stage must declare a produced artifact: $stage_file"
+  assert_eq "$(plugin_yaml_list "$stage_frontmatter" scopes)" flow-slice "stage must belong only to flow-slice"
+  printf '%s\n%s\n' "$produced" "$optional_produced" | while IFS= read -r artifact; do
+    [ -z "$artifact" ] && continue
+    case "$artifact" in
+      flow-*) ;;
+      *) fail "produced artifact must use flow- namespace: $stage_file" ;;
+    esac
+  done
 done
 
-contract=$(cat "$PLUGIN_ROOT/stages/inception/flow-slice-contract.md")
-assert_contains "$contract" '  - flow-requirements' "contract artifact namespace"
-assert_contains "$contract" 'outputs: flow-requirements.md and flow-slice-contract.md' "contract output names"
+contract_frontmatter=$(plugin_frontmatter "$PLUGIN_ROOT/stages/inception/flow-slice-contract.md")
+assert_eq "$(plugin_yaml_scalar "$contract_frontmatter" outputs)" 'flow-requirements.md and flow-slice-contract.md under the engine-resolved record directory' "contract output names"
 
-slice_review=$(cat "$PLUGIN_ROOT/stages/construction/flow-slice-review.md")
-assert_contains "$slice_review" 'lead_agent: aidlc-architecture-reviewer-agent' "slice review"
-assert_contains "$slice_review" '  - artifact: flow-slice-contract' "slice review consumes plugin artifact"
-assert_contains "$slice_review" '  - artifact: code-summary' "slice review consumes core artifact"
-assert_contains "$slice_review" '  - artifact: build-test-results' "slice review consumes core test artifact"
-assert_contains "$slice_review" '  - build-and-test' "slice review requires core stage"
-assert_contains "$slice_review" 'outputs: flow-slice-review.md' "slice review output name"
-case "$slice_review" in
-  *'reviewer:'*) fail "slice review: must not declare reviewer" ;;
-esac
+slice_review_frontmatter=$(plugin_frontmatter "$PLUGIN_ROOT/stages/construction/flow-slice-review.md")
+assert_eq "$(plugin_yaml_scalar "$slice_review_frontmatter" lead_agent)" aidlc-architecture-reviewer-agent "slice review lead agent"
+assert_eq "$(plugin_yaml_object_list_field "$slice_review_frontmatter" consumes artifact)" 'flow-slice-contract
+code-summary
+build-test-results' "slice review consumed artifacts"
+assert_eq "$(plugin_yaml_list "$slice_review_frontmatter" requires_stage)" build-and-test "slice review requires core stage"
+assert_eq "$(plugin_yaml_scalar "$slice_review_frontmatter" outputs)" 'flow-slice-review.md under the engine-resolved record directory' "slice review output name"
+assert_eq "$(plugin_yaml_scalar "$slice_review_frontmatter" reviewer)" '' "slice review must not declare reviewer"
 
-merge_readiness=$(cat "$PLUGIN_ROOT/stages/construction/flow-merge-readiness.md")
-assert_contains "$merge_readiness" '  - artifact: flow-slice-review' "merge readiness consumes plugin artifact"
-assert_contains "$merge_readiness" '  - artifact: build-test-results' "merge readiness consumes core artifact"
-assert_contains "$merge_readiness" '  - flow-slice-review' "merge readiness requires plugin stage"
-assert_contains "$merge_readiness" 'outputs: flow-merge-readiness.md' "merge readiness output name"
+merge_readiness_frontmatter=$(plugin_frontmatter "$PLUGIN_ROOT/stages/construction/flow-merge-readiness.md")
+assert_eq "$(plugin_yaml_object_list_field "$merge_readiness_frontmatter" consumes artifact)" 'flow-slice-review
+build-test-results' "merge readiness consumed artifacts"
+assert_eq "$(plugin_yaml_list "$merge_readiness_frontmatter" requires_stage)" flow-slice-review "merge readiness requires plugin stage"
+assert_eq "$(plugin_yaml_scalar "$merge_readiness_frontmatter" outputs)" 'flow-merge-readiness.md under the engine-resolved record directory' "merge readiness output name"
 
 printf 'PASS: plugin-source-test\n'
