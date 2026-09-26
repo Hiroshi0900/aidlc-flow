@@ -43,6 +43,7 @@ validate_flow_projection() {
   if ! python3 - "$aidlc_flow_projection" "$aidlc_flow_projection_harness" <<'PY'
 import json
 import os
+import re
 import sys
 
 root, harness = sys.argv[1:]
@@ -56,7 +57,8 @@ with open(os.path.join(manifest_dir, "marketplace.json"), encoding="utf-8") as s
 expected = {"schema": 1, "producer": "aidlc-plugin-build", "plugin": "flow", "harness": harness}
 if projection != expected:
     raise SystemExit("invalid projection metadata")
-if plugin.get("name") != "aidlc-flow" or not isinstance(plugin.get("version"), str):
+semver = r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+if plugin.get("name") != "aidlc-flow" or not isinstance(plugin.get("version"), str) or not re.fullmatch(semver, plugin["version"]):
     raise SystemExit("invalid host plugin manifest")
 if marketplace.get("name") != "aidlc-plugins":
     raise SystemExit("invalid marketplace name")
@@ -185,6 +187,145 @@ PY
   }
 }
 
+flow_plugin_cache_state() {
+  aidlc_flow_cache_harness=$1
+  aidlc_flow_cache_inventory=$2
+  aidlc_flow_cache_projection=$3
+  aidlc_flow_cache_project=$4
+  python3 - "$aidlc_flow_cache_harness" "$aidlc_flow_cache_inventory" \
+    "$aidlc_flow_cache_projection" "$aidlc_flow_cache_project" <<'PY'
+import hashlib
+import json
+import os
+import re
+import sys
+
+harness, inventory_path, projection, project = sys.argv[1:]
+compose_dirs = ("agents", "contributions", "knowledge", "scopes", "sensors", "stages", "tools")
+
+def source_hash(root):
+    if not os.path.isabs(root) or os.path.islink(root) or not os.path.isdir(root):
+        raise SystemExit(f"unsafe plugin cache directory: {root}")
+    root = os.path.realpath(root)
+    files = []
+    for directory in compose_dirs + ("hooks",):
+        base = os.path.join(root, directory)
+        if not os.path.exists(base):
+            continue
+        if os.path.islink(base) or not os.path.isdir(base):
+            raise SystemExit(f"unsafe plugin cache surface: {base}")
+        for current, directories, names in os.walk(base, followlinks=False):
+            for name in directories:
+                path = os.path.join(current, name)
+                if os.path.islink(path):
+                    raise SystemExit(f"symbolic link in plugin cache: {path}")
+            for name in names:
+                path = os.path.join(current, name)
+                if os.path.islink(path) or not os.path.isfile(path):
+                    raise SystemExit(f"unsafe file in plugin cache: {path}")
+                files.append((os.path.relpath(path, root).replace(os.sep, "/"), path))
+    manifest = os.path.join(root, f".{harness}-plugin", "plugin.json")
+    if os.path.islink(manifest) or not os.path.isfile(manifest):
+        raise SystemExit(f"plugin manifest is missing or unsafe: {manifest}")
+    try:
+        manifest_value = json.load(open(manifest, encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise SystemExit(f"invalid plugin manifest: {error}")
+    files.append((f".{harness}-plugin/plugin.json", None))
+    digest = hashlib.sha256()
+    for relative, path in sorted(files):
+        if path is None:
+            data = json.dumps(manifest_value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        else:
+            data = open(path, "rb").read()
+            try:
+                text = data.decode("utf-8")
+                if text.encode("utf-8") == data:
+                    data = text.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
+            except UnicodeDecodeError:
+                pass
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(data)
+    return "sha256:" + digest.hexdigest()
+
+projection_hash = source_hash(projection)
+with open(os.path.join(projection, f".{harness}-plugin", "plugin.json"), encoding="utf-8") as source:
+    projection_manifest = json.load(source)
+projection_version = projection_manifest.get("version")
+semver = r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+if not isinstance(projection_version, str) or not re.fullmatch(semver, projection_version):
+    raise SystemExit("invalid projection plugin version")
+with open(inventory_path, encoding="utf-8") as source:
+    value = json.load(source)
+
+if harness == "codex":
+    entries = value.get("installed") if isinstance(value, dict) else None
+    if not isinstance(entries, list):
+        raise SystemExit("invalid Codex plugin inventory")
+    matches = [entry for entry in entries if isinstance(entry, dict) and entry.get("pluginId") == "aidlc-flow@aidlc-plugins"]
+    if not matches:
+        print("missing")
+        raise SystemExit(0)
+    if len(matches) != 1:
+        raise SystemExit("ambiguous Codex plugin inventory")
+    entry = matches[0]
+    version = entry.get("version")
+    plugin_source = entry.get("source")
+    if (
+        entry.get("installed") is False
+        or entry.get("enabled") is not True
+        or not isinstance(version, str)
+        or not re.fullmatch(semver, version)
+        or not isinstance(plugin_source, dict)
+        or plugin_source.get("source") != "local"
+        or not isinstance(plugin_source.get("path"), str)
+        or os.path.realpath(plugin_source["path"]) != projection
+    ):
+        print("missing")
+        raise SystemExit(0)
+    codex_home = os.path.realpath(os.environ.get("CODEX_HOME", os.path.join(os.path.expanduser("~"), ".codex")))
+    installed = os.path.join(codex_home, "plugins", "cache", "aidlc-plugins", "aidlc-flow", version)
+    if version != projection_version:
+        print("version-changed")
+    elif source_hash(installed) == projection_hash:
+        print("current")
+    else:
+        print("same-version-mismatch")
+elif harness == "claude":
+    if not isinstance(value, list):
+        raise SystemExit("invalid Claude plugin inventory")
+    matches = [entry for entry in value if isinstance(entry, dict) and entry.get("id") == "aidlc-flow@aidlc-plugins"]
+    project_matches = [
+        entry for entry in matches
+        if entry.get("scope") == "project"
+        and isinstance(entry.get("projectPath"), str)
+        and os.path.realpath(entry["projectPath"]) == project
+    ]
+    if not project_matches:
+        print("missing")
+        raise SystemExit(0)
+    if len(project_matches) != 1:
+        raise SystemExit("ambiguous Claude project plugin inventory")
+    installed = project_matches[0].get("installPath")
+    installed_version = project_matches[0].get("version")
+    if not isinstance(installed, str) or not isinstance(installed_version, str) or not re.fullmatch(semver, installed_version):
+        raise SystemExit("Claude project plugin inventory has no installPath")
+    cache_root = os.path.realpath(os.path.join(os.environ.get("CLAUDE_CONFIG_DIR", os.path.join(os.path.expanduser("~"), ".claude")), "plugins", "cache"))
+    installed_real = os.path.realpath(installed)
+    if os.path.commonpath((cache_root, installed_real)) != cache_root:
+        raise SystemExit("Claude plugin installPath escapes the host cache")
+    if installed_version != projection_version:
+        print("version-changed")
+    elif source_hash(installed) == projection_hash:
+        print("current")
+    else:
+        print("same-version-mismatch")
+else:
+    raise SystemExit(f"unsupported harness: {harness}")
+PY
+}
+
 install_flow_plugin() (
   set -e
   aidlc_flow_project=$1
@@ -241,19 +382,26 @@ PY
         *) plugin_install_die "invalid Codex marketplace inventory result"; exit 1 ;;
       esac
       codex plugin list --json > "$aidlc_flow_plugins"
-      aidlc_flow_plugin_state=$(python3 - "$aidlc_flow_plugins" <<'PY'
-import json, sys
-with open(sys.argv[1], encoding="utf-8") as source:
-    value = json.load(source)
-entries = value.get("installed") if isinstance(value, dict) else None
-if not isinstance(entries, list):
-    raise SystemExit("invalid Codex plugin inventory")
-matches = [entry for entry in entries if isinstance(entry, dict) and entry.get("pluginId") == "aidlc-flow@aidlc-plugins"]
-print("enabled" if any(entry.get("enabled") is True for entry in matches) else "missing")
-PY
-      ) || { plugin_install_die "invalid Codex plugin inventory"; exit 1; }
+      aidlc_flow_plugin_state=$(flow_plugin_cache_state codex "$aidlc_flow_plugins" \
+        "$aidlc_flow_projection" "$aidlc_flow_project") || {
+        plugin_install_die "invalid Codex plugin inventory or cache"
+        exit 1
+      }
       case "$aidlc_flow_plugin_state" in
-        enabled) ;;
+        current) ;;
+        version-changed)
+          codex plugin add aidlc-flow@aidlc-plugins
+          codex plugin list --json > "$aidlc_flow_plugins"
+          [ "$(flow_plugin_cache_state codex "$aidlc_flow_plugins" "$aidlc_flow_projection" "$aidlc_flow_project")" = current ] || {
+            plugin_install_die "Codex plugin cache did not refresh"
+            exit 1
+          }
+          ;;
+        same-version-mismatch)
+          aidlc_flow_projection_version=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["version"])' "$aidlc_flow_projection/.codex-plugin/plugin.json")
+          plugin_install_die "plugin version $aidlc_flow_projection_version has different content; bump plugins/flow/.aidlc-plugin/plugin.json version and rebuild/reinstall"
+          exit 1
+          ;;
         missing) codex plugin add aidlc-flow@aidlc-plugins ;;
         *) plugin_install_die "invalid Codex plugin inventory result"; exit 1 ;;
       esac
@@ -289,25 +437,26 @@ PY
         *) plugin_install_die "invalid Claude marketplace inventory result"; exit 1 ;;
       esac
       claude plugin list --json > "$aidlc_flow_plugins"
-      aidlc_flow_plugin_state=$(python3 - "$aidlc_flow_plugins" "$aidlc_flow_project" <<'PY'
-import json, os, sys
-with open(sys.argv[1], encoding="utf-8") as source:
-    entries = json.load(source)
-if not isinstance(entries, list):
-    raise SystemExit("invalid Claude plugin inventory")
-matches = [entry for entry in entries if isinstance(entry, dict) and entry.get("id") == "aidlc-flow@aidlc-plugins"]
-enabled = any(
-    entry.get("enabled") is True
-    and entry.get("scope") == "project"
-    and isinstance(entry.get("projectPath"), str)
-    and os.path.realpath(entry["projectPath"]) == os.path.realpath(sys.argv[2])
-    for entry in matches
-)
-print("enabled" if enabled else "missing")
-PY
-      ) || { plugin_install_die "invalid Claude plugin inventory"; exit 1; }
+      aidlc_flow_plugin_state=$(flow_plugin_cache_state claude "$aidlc_flow_plugins" \
+        "$aidlc_flow_projection" "$aidlc_flow_project") || {
+        plugin_install_die "invalid Claude plugin inventory or cache"
+        exit 1
+      }
       case "$aidlc_flow_plugin_state" in
-        enabled) ;;
+        current) ;;
+        version-changed)
+          claude plugin update --scope project --yes aidlc-flow@aidlc-plugins
+          claude plugin list --json > "$aidlc_flow_plugins"
+          [ "$(flow_plugin_cache_state claude "$aidlc_flow_plugins" "$aidlc_flow_projection" "$aidlc_flow_project")" = current ] || {
+            plugin_install_die "Claude plugin cache did not refresh"
+            exit 1
+          }
+          ;;
+        same-version-mismatch)
+          aidlc_flow_projection_version=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["version"])' "$aidlc_flow_projection/.claude-plugin/plugin.json")
+          plugin_install_die "plugin version $aidlc_flow_projection_version has different content; bump plugins/flow/.aidlc-plugin/plugin.json version and rebuild/reinstall"
+          exit 1
+          ;;
         missing) claude plugin install --scope project --yes aidlc-flow@aidlc-plugins ;;
         *) plugin_install_die "invalid Claude plugin inventory result"; exit 1 ;;
       esac

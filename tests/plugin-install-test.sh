@@ -15,11 +15,12 @@ project=$(CDPATH= cd -- "$project" && pwd -P)
 make_projection() {
   fixture_harness=$1
   fixture="$projection_root/$fixture_harness"
-  mkdir -p "$fixture/.$fixture_harness-plugin" "$fixture/hooks"
+  mkdir -p "$fixture/.$fixture_harness-plugin" "$fixture/hooks" "$fixture/scopes"
   printf '%s\n' "{\"schema\":1,\"producer\":\"aidlc-plugin-build\",\"plugin\":\"flow\",\"harness\":\"$fixture_harness\"}" > "$fixture/.aidlc-plugin-projection.json"
   printf '%s\n' '{"name":"aidlc-flow","version":"0.1.0"}' > "$fixture/.$fixture_harness-plugin/plugin.json"
   printf '%s\n' '{"name":"aidlc-plugins","plugins":[{"name":"aidlc-flow","source":".","version":"0.1.0"}]}' > "$fixture/.$fixture_harness-plugin/marketplace.json"
   printf '%s\n' 'export async function compose() {}' > "$fixture/hooks/compose.ts"
+  printf '%s\n' 'initial payload' > "$fixture/scopes/flow-slice.md"
   if [ "$fixture_harness" = codex ]; then
     mkdir -p "$fixture/.agents/plugins"
     printf '%s\n' '{"name":"aidlc-plugins","plugins":[{"name":"aidlc-flow","source":{"source":"local","path":"./"},"policy":{"installation":"AVAILABLE","authentication":"ON_USE"}}]}' > "$fixture/.agents/plugins/marketplace.json"
@@ -27,6 +28,18 @@ make_projection() {
 }
 make_projection codex
 make_projection claude
+codex_cache="$tmp/codex-home/plugins/cache/aidlc-plugins/aidlc-flow/0.1.0"
+claude_cache="$tmp/claude-config/plugins/cache/aidlc-plugins/aidlc-flow/0.1.0"
+mkdir -p "$(dirname "$codex_cache")"
+mkdir -p "$(dirname "$claude_cache")"
+cp -R "$projection_root/codex" "$codex_cache"
+cp -R "$projection_root/claude" "$claude_cache"
+export CODEX_HOME="$tmp/codex-home"
+export CLAUDE_CONFIG_DIR="$tmp/claude-config"
+export HOST_FAKE_CODEX_CACHE="$codex_cache"
+export HOST_FAKE_CLAUDE_CACHE="$claude_cache"
+export HOST_FAKE_CODEX_PROJECTION="$projection_root/codex"
+export HOST_FAKE_CLAUDE_PROJECTION="$projection_root/claude"
 
 cat > "$fake_bin/codex" <<'SH'
 #!/bin/sh
@@ -36,9 +49,19 @@ case "$*" in
     if [ -n "${CODEX_MARKETPLACES_JSON:-}" ]; then printf '%s\n' "$CODEX_MARKETPLACES_JSON"; else printf '%s\n' '{"marketplaces":[]}'; fi
     ;;
   'plugin list --json')
-    if [ -n "${CODEX_PLUGINS_JSON:-}" ]; then printf '%s\n' "$CODEX_PLUGINS_JSON"; else printf '%s\n' '{"installed":[],"available":[]}'; fi
+    if [ -f "${HOST_FAKE_CODEX_UPDATED:-/nonexistent}" ] && [ -n "${CODEX_PLUGINS_AFTER_JSON:-}" ]; then
+      printf '%s\n' "$CODEX_PLUGINS_AFTER_JSON"
+    elif [ -n "${CODEX_PLUGINS_JSON:-}" ]; then printf '%s\n' "$CODEX_PLUGINS_JSON"; else printf '%s\n' '{"installed":[],"available":[]}'; fi
     ;;
-  'plugin marketplace add '*|'plugin add '*) exit "${HOST_FAKE_MUTATE_STATUS:-0}" ;;
+  'plugin marketplace add '*) exit "${HOST_FAKE_MUTATE_STATUS:-0}" ;;
+  'plugin add '*)
+    [ "${HOST_FAKE_MUTATE_STATUS:-0}" -eq 0 ] || exit "$HOST_FAKE_MUTATE_STATUS"
+    if [ -n "${HOST_FAKE_REFRESH_CODEX:-}" ]; then
+      rm -rf "$HOST_FAKE_CODEX_CACHE"
+      cp -R "$HOST_FAKE_CODEX_PROJECTION" "$HOST_FAKE_CODEX_CACHE"
+      touch "$HOST_FAKE_CODEX_UPDATED"
+    fi
+    ;;
   *) exit 91 ;;
 esac
 SH
@@ -50,9 +73,17 @@ case "$*" in
     if [ -n "${CLAUDE_MARKETPLACES_JSON:-}" ]; then printf '%s\n' "$CLAUDE_MARKETPLACES_JSON"; else printf '%s\n' '[]'; fi
     ;;
   'plugin list --json')
-    if [ -n "${CLAUDE_PLUGINS_JSON:-}" ]; then printf '%s\n' "$CLAUDE_PLUGINS_JSON"; else printf '%s\n' '[]'; fi
+    if [ -f "${HOST_FAKE_CLAUDE_UPDATED:-/nonexistent}" ] && [ -n "${CLAUDE_PLUGINS_AFTER_JSON:-}" ]; then
+      printf '%s\n' "$CLAUDE_PLUGINS_AFTER_JSON"
+    elif [ -n "${CLAUDE_PLUGINS_JSON:-}" ]; then printf '%s\n' "$CLAUDE_PLUGINS_JSON"; else printf '%s\n' '[]'; fi
     ;;
   'plugin marketplace add --scope project '*|'plugin install --scope project --yes '*) exit "${HOST_FAKE_MUTATE_STATUS:-0}" ;;
+  'plugin update --scope project --yes '*)
+    [ "${HOST_FAKE_MUTATE_STATUS:-0}" -eq 0 ] || exit "$HOST_FAKE_MUTATE_STATUS"
+    rm -rf "$HOST_FAKE_CLAUDE_CACHE"
+    cp -R "$HOST_FAKE_CLAUDE_PROJECTION" "$HOST_FAKE_CLAUDE_CACHE"
+    touch "$HOST_FAKE_CLAUDE_UPDATED"
+    ;;
   *) exit 92 ;;
 esac
 SH
@@ -85,6 +116,17 @@ assert_contains "$missing_adapter_output" "marketplace adapter" "missing Codex a
 assert_eq "$(cat "$HOST_FAKE_LOG")" "" "missing Codex adapter stops before host CLI"
 
 : > "$HOST_FAKE_LOG"
+cp -R "$projection_root/claude" "$projection_root/claude-version-mismatch"
+perl -pi -e 's/0\.1\.0/0.1.1/g' "$projection_root/claude-version-mismatch/.claude-plugin/marketplace.json"
+set +e
+manifest_mismatch_output=$(install_flow_plugin "$project" claude "$projection_root/claude-version-mismatch" 2>&1)
+manifest_mismatch_status=$?
+set -e
+assert_eq "$manifest_mismatch_status" 1 "manifest and marketplace version mismatch is rejected"
+assert_contains "$manifest_mismatch_output" "metadata is invalid" "version mismatch has a projection diagnostic"
+assert_eq "$(cat "$HOST_FAKE_LOG")" "" "version mismatch stops before host CLI"
+
+: > "$HOST_FAKE_LOG"
 install_flow_plugin "$project" codex "$projection_root/codex"
 assert_eq "$(cat "$HOST_FAKE_LOG")" "codex|$project|plugin marketplace list --json
 codex|$project|plugin marketplace add $projection_root/codex
@@ -95,7 +137,7 @@ aidlc|$project|engine plugin sync|harness=.codex/codex" "Codex host install prec
 
 : > "$HOST_FAKE_LOG"
 CODEX_MARKETPLACES_JSON="{\"marketplaces\":[{\"name\":\"aidlc-plugins\",\"root\":\"$projection_root/codex\",\"marketplaceSource\":{\"sourceType\":\"local\",\"source\":\"$projection_root/codex\"}}]}"
-CODEX_PLUGINS_JSON='{"installed":[{"pluginId":"aidlc-flow@aidlc-plugins","enabled":true}],"available":[]}'
+CODEX_PLUGINS_JSON="{\"installed\":[{\"pluginId\":\"aidlc-flow@aidlc-plugins\",\"enabled\":true,\"version\":\"0.1.0\",\"source\":{\"source\":\"local\",\"path\":\"$projection_root/codex\"}}],\"available\":[]}"
 export CODEX_MARKETPLACES_JSON CODEX_PLUGINS_JSON
 install_flow_plugin "$project" codex "$projection_root/codex"
 assert_eq "$(cat "$HOST_FAKE_LOG")" "codex|$project|plugin marketplace list --json
@@ -103,6 +145,33 @@ codex|$project|plugin list --json
 aidlc|$project|config project --project-dir $project --plugins flow --yes|harness=/
 aidlc|$project|engine plugin sync|harness=.codex/codex" "same Codex source is host-idempotent"
 unset CODEX_PLUGINS_JSON
+
+: > "$HOST_FAKE_LOG"
+printf '%s\n' 'changed Codex payload' >> "$projection_root/codex/scopes/flow-slice.md"
+CODEX_MARKETPLACES_JSON="{\"marketplaces\":[{\"name\":\"aidlc-plugins\",\"root\":\"$projection_root/codex\",\"marketplaceSource\":{\"sourceType\":\"local\",\"source\":\"$projection_root/codex\"}}]}"
+CODEX_PLUGINS_JSON="{\"installed\":[{\"pluginId\":\"aidlc-flow@aidlc-plugins\",\"enabled\":true,\"version\":\"0.1.0\",\"source\":{\"source\":\"local\",\"path\":\"$projection_root/codex\"}}],\"available\":[]}"
+export CODEX_MARKETPLACES_JSON CODEX_PLUGINS_JSON
+set +e
+same_version_output=$(install_flow_plugin "$project" codex "$projection_root/codex" 2>&1)
+same_version_status=$?
+set -e
+assert_eq "$same_version_status" 1 "same-version Codex content mismatch is rejected"
+assert_contains "$same_version_output" "bump plugins/flow/.aidlc-plugin/plugin.json version" "Codex mismatch explains the required version bump"
+case "$(cat "$HOST_FAKE_LOG")" in *'plugin add '*|*'config project'*|*'engine plugin sync'*) fail "Codex mismatch must stop before mutation" ;; esac
+case "$(cat "$codex_cache/scopes/flow-slice.md")" in *'changed Codex payload'*) fail "Codex mismatch changed the old cache" ;; esac
+
+perl -pi -e 's/0\.1\.0/0.1.1/g' "$projection_root/codex/.codex-plugin/plugin.json" "$projection_root/codex/.codex-plugin/marketplace.json"
+codex_cache="$tmp/codex-home/plugins/cache/aidlc-plugins/aidlc-flow/0.1.1"
+HOST_FAKE_CODEX_CACHE="$codex_cache"
+HOST_FAKE_CODEX_UPDATED="$tmp/codex-updated"
+CODEX_PLUGINS_AFTER_JSON="{\"installed\":[{\"pluginId\":\"aidlc-flow@aidlc-plugins\",\"enabled\":true,\"version\":\"0.1.1\",\"source\":{\"source\":\"local\",\"path\":\"$projection_root/codex\"}}],\"available\":[]}"
+HOST_FAKE_REFRESH_CODEX=1
+export HOST_FAKE_CODEX_CACHE HOST_FAKE_CODEX_UPDATED CODEX_PLUGINS_AFTER_JSON HOST_FAKE_REFRESH_CODEX
+: > "$HOST_FAKE_LOG"
+install_flow_plugin "$project" codex "$projection_root/codex"
+assert_contains "$(cat "$HOST_FAKE_LOG")" "plugin add aidlc-flow@aidlc-plugins" "new Codex version uses the supported add update path"
+assert_contains "$(cat "$codex_cache/scopes/flow-slice.md")" "changed Codex payload" "Codex version update installs changed payload"
+unset CODEX_MARKETPLACES_JSON CODEX_PLUGINS_JSON CODEX_PLUGINS_AFTER_JSON HOST_FAKE_REFRESH_CODEX HOST_FAKE_CODEX_UPDATED
 
 : > "$HOST_FAKE_LOG"
 CODEX_MARKETPLACES_JSON="{\"marketplaces\":[{\"name\":\"aidlc-plugins\",\"root\":\"$projection_root/codex\",\"marketplaceSource\":{\"sourceType\":\"local\",\"source\":\"$projection_root/codex\"}}]}"
@@ -141,7 +210,7 @@ aidlc|$project|engine plugin sync|harness=.claude/claude" "Claude project-local 
 
 : > "$HOST_FAKE_LOG"
 CLAUDE_MARKETPLACES_JSON="[{\"name\":\"aidlc-plugins\",\"source\":\"directory\",\"path\":\"$projection_root/claude\",\"installLocation\":\"$projection_root/claude\"}]"
-CLAUDE_PLUGINS_JSON="[{\"id\":\"aidlc-flow@aidlc-plugins\",\"scope\":\"project\",\"enabled\":true,\"projectPath\":\"$project\"}]"
+CLAUDE_PLUGINS_JSON="[{\"id\":\"aidlc-flow@aidlc-plugins\",\"version\":\"0.1.0\",\"scope\":\"project\",\"enabled\":true,\"projectPath\":\"$project\",\"installPath\":\"$claude_cache\"}]"
 export CLAUDE_MARKETPLACES_JSON CLAUDE_PLUGINS_JSON
 install_flow_plugin "$project" claude "$projection_root/claude"
 assert_eq "$(cat "$HOST_FAKE_LOG")" "claude|$project|plugin marketplace list --json
@@ -149,6 +218,57 @@ claude|$project|plugin list --json
 aidlc|$project|config project --project-dir $project --plugins flow --yes|harness=/
 aidlc|$project|engine plugin sync|harness=.claude/claude" "same Claude source is host-idempotent"
 unset CLAUDE_MARKETPLACES_JSON CLAUDE_PLUGINS_JSON
+
+: > "$HOST_FAKE_LOG"
+printf '%s\n' 'changed Claude payload' >> "$projection_root/claude/scopes/flow-slice.md"
+CLAUDE_MARKETPLACES_JSON="[{\"name\":\"aidlc-plugins\",\"source\":\"directory\",\"path\":\"$projection_root/claude\",\"installLocation\":\"$projection_root/claude\"}]"
+CLAUDE_PLUGINS_JSON="[{\"id\":\"aidlc-flow@aidlc-plugins\",\"version\":\"0.1.0\",\"scope\":\"project\",\"enabled\":true,\"projectPath\":\"$project\",\"installPath\":\"$claude_cache\"}]"
+export CLAUDE_MARKETPLACES_JSON CLAUDE_PLUGINS_JSON
+set +e
+same_version_output=$(install_flow_plugin "$project" claude "$projection_root/claude" 2>&1)
+same_version_status=$?
+set -e
+assert_eq "$same_version_status" 1 "same-version Claude content mismatch is rejected"
+assert_contains "$same_version_output" "bump plugins/flow/.aidlc-plugin/plugin.json version" "Claude mismatch explains the required version bump"
+case "$(cat "$HOST_FAKE_LOG")" in *'plugin update '*|*'config project'*|*'engine plugin sync'*) fail "Claude mismatch must stop before mutation" ;; esac
+
+perl -pi -e 's/0\.1\.0/0.1.1/g' "$projection_root/claude/.claude-plugin/plugin.json" "$projection_root/claude/.claude-plugin/marketplace.json"
+claude_cache="$tmp/claude-config/plugins/cache/aidlc-plugins/aidlc-flow/0.1.1"
+HOST_FAKE_CLAUDE_CACHE="$claude_cache"
+HOST_FAKE_CLAUDE_UPDATED="$tmp/claude-updated"
+CLAUDE_PLUGINS_AFTER_JSON="[{\"id\":\"aidlc-flow@aidlc-plugins\",\"version\":\"0.1.1\",\"scope\":\"project\",\"enabled\":true,\"projectPath\":\"$project\",\"installPath\":\"$claude_cache\"}]"
+export HOST_FAKE_CLAUDE_CACHE HOST_FAKE_CLAUDE_UPDATED CLAUDE_PLUGINS_AFTER_JSON
+: > "$HOST_FAKE_LOG"
+install_flow_plugin "$project" claude "$projection_root/claude"
+assert_contains "$(cat "$HOST_FAKE_LOG")" "plugin update --scope project --yes aidlc-flow@aidlc-plugins" "new Claude version uses the supported project update path"
+assert_contains "$(cat "$claude_cache/scopes/flow-slice.md")" "changed Claude payload" "Claude version update installs changed payload"
+unset CLAUDE_MARKETPLACES_JSON CLAUDE_PLUGINS_JSON CLAUDE_PLUGINS_AFTER_JSON HOST_FAKE_CLAUDE_UPDATED
+
+for update_harness in codex claude; do
+  perl -pi -e 's/0\.1\.1/0.1.2/g' "$projection_root/$update_harness/.$update_harness-plugin/plugin.json" "$projection_root/$update_harness/.$update_harness-plugin/marketplace.json"
+  : > "$HOST_FAKE_LOG"
+  HOST_FAKE_MUTATE_STATUS=41
+  export HOST_FAKE_MUTATE_STATUS
+  case "$update_harness" in
+    codex)
+      CODEX_MARKETPLACES_JSON="{\"marketplaces\":[{\"name\":\"aidlc-plugins\",\"root\":\"$projection_root/codex\",\"marketplaceSource\":{\"sourceType\":\"local\",\"source\":\"$projection_root/codex\"}}]}"
+      CODEX_PLUGINS_JSON="{\"installed\":[{\"pluginId\":\"aidlc-flow@aidlc-plugins\",\"enabled\":true,\"version\":\"0.1.1\",\"source\":{\"source\":\"local\",\"path\":\"$projection_root/codex\"}}],\"available\":[]}"
+      export CODEX_MARKETPLACES_JSON CODEX_PLUGINS_JSON
+      ;;
+    claude)
+      CLAUDE_MARKETPLACES_JSON="[{\"name\":\"aidlc-plugins\",\"source\":\"directory\",\"path\":\"$projection_root/claude\",\"installLocation\":\"$projection_root/claude\"}]"
+      CLAUDE_PLUGINS_JSON="[{\"id\":\"aidlc-flow@aidlc-plugins\",\"version\":\"0.1.1\",\"scope\":\"project\",\"enabled\":true,\"projectPath\":\"$project\",\"installPath\":\"$claude_cache\"}]"
+      export CLAUDE_MARKETPLACES_JSON CLAUDE_PLUGINS_JSON
+      ;;
+  esac
+  set +e
+  install_flow_plugin "$project" "$update_harness" "$projection_root/$update_harness" >/dev/null 2>&1
+  update_failure_status=$?
+  set -e
+  assert_eq "$update_failure_status" 41 "$update_harness version-update failure propagates"
+  case "$(cat "$HOST_FAKE_LOG")" in *'config project'*|*'engine plugin sync'*) fail "$update_harness update failure must stop before AI-DLC" ;; esac
+  unset HOST_FAKE_MUTATE_STATUS CODEX_MARKETPLACES_JSON CODEX_PLUGINS_JSON CLAUDE_MARKETPLACES_JSON CLAUDE_PLUGINS_JSON
+done
 
 for failure in host select sync; do
   : > "$HOST_FAKE_LOG"
