@@ -2,6 +2,24 @@
 set -eu
 . "$(dirname "$0")/testlib.sh"
 
+reject_guard_bypass() {
+  guard_name=$1
+  guard_value=$2
+  [ -z "$guard_value" ] || fail "guard bypass environment must be unset: $guard_name"
+}
+
+reject_guard_bypass AIDLC_SKIP_HUMAN_PRESENCE_GUARD "${AIDLC_SKIP_HUMAN_PRESENCE_GUARD-}"
+reject_guard_bypass AIDLC_SKIP_ARTIFACT_GUARD "${AIDLC_SKIP_ARTIFACT_GUARD-}"
+reject_guard_bypass AIDLC_DISABLE_ENSEMBLE_EVIDENCE "${AIDLC_DISABLE_ENSEMBLE_EVIDENCE-}"
+reject_guard_bypass AIDLC_DISABLE_SENSORS "${AIDLC_DISABLE_SENSORS-}"
+reject_guard_bypass AIDLC_SKIP_SOURCE_FRESHNESS "${AIDLC_SKIP_SOURCE_FRESHNESS-}"
+reject_guard_bypass AIDLC_DISABLE_PLAN_APPROVAL_GUARD "${AIDLC_DISABLE_PLAN_APPROVAL_GUARD-}"
+reject_guard_bypass AIDLC_DISABLE_REVIEWER_SCOPE_HOOK "${AIDLC_DISABLE_REVIEWER_SCOPE_HOOK-}"
+reject_guard_bypass AIDLC_DISABLE_REVIEW_FREEZE_HOOK "${AIDLC_DISABLE_REVIEW_FREEZE_HOOK-}"
+reject_guard_bypass AIDLC_SKIP_REVIEWER_GATE_GUARD "${AIDLC_SKIP_REVIEWER_GATE_GUARD-}"
+reject_guard_bypass AIDLC_SKIP_REVISION_BACKSTOP "${AIDLC_SKIP_REVISION_BACKSTOP-}"
+reject_guard_bypass AIDLC_SKIP_SUMMARY_CONFIRMATION_GUARD "${AIDLC_SKIP_SUMMARY_CONFIRMATION_GUARD-}"
+
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 tmp=$(new_tmpdir)
 tmp=$(CDPATH= cd -- "$tmp" && pwd -P)
@@ -265,6 +283,18 @@ PY
     stage=$1
     engine orchestrate report --stage "$stage" \
       --result awaiting-approval >"$tmp/$harness-$stage-gate.json"
+    engine orchestrate report --stage "$stage" \
+      --result approved --user-input Approve >"$tmp/$harness-$stage-before-human.json"
+    python3 - "$tmp/$harness-$stage-before-human.json" "$stage" <<'PY' || exit 1
+import json
+import sys
+
+path, stage = sys.argv[1:]
+directive = json.load(open(path, encoding="utf-8"))
+message = directive.get("message")
+if directive.get("kind") != "error" or not isinstance(message, str) or "no new human reply" not in message:
+    raise SystemExit(f"{stage} accepted approval before HUMAN_TURN: {directive!r}")
+PY
     record_human_turn Approve
     engine orchestrate report --stage "$stage" \
       --result approved --user-input Approve >"$tmp/$harness-$stage-approved.json"
@@ -317,32 +347,120 @@ PY
     fail "$harness AI-DLC doctor failed"
   fi
 
+  # Exercise the official ensemble guard on a stock mob stage without changing
+  # the approved flow-slice graph (whose support-bearing build stage is inline).
+  ensemble_project="$tmp/$harness-ensemble-project"
+  cp -cR "$project" "$ensemble_project"
+  ensemble_engine() {
+    (cd "$ensemble_project" && HOME="$isolated_home" CODEX_HOME="$codex_home" \
+      CLAUDE_CONFIG_DIR="$claude_config" AIDLC_HARNESS_DIR="$harness_dir" \
+      AIDLC_HARNESS_NAME="$harness" PATH="$isolated_home/.local/bin:$PATH" \
+      "$aidlc_for_harness" engine "$@" </dev/null)
+  }
+  ensemble_engine intent create --scope classic \
+    --arguments "ensemble guard control" --label support-guard >/dev/null
+  ensemble_directive="$tmp/$harness-ensemble-directive.json"
+  ensemble_engine orchestrate next --stage user-stories --single >"$ensemble_directive"
+  while [ "$(python3 - "$ensemble_directive" <<'PY'
+import json
+import sys
+
+print(json.load(open(sys.argv[1], encoding="utf-8")).get("kind", ""))
+PY
+  )" = load-steering ]; do
+    ensemble_token=$(python3 - "$ensemble_directive" <<'PY'
+import json
+import sys
+
+print(json.load(open(sys.argv[1], encoding="utf-8"))["continue_token"])
+PY
+    )
+    ensemble_engine orchestrate continue "$ensemble_token" >"$ensemble_directive.next"
+    mv "$ensemble_directive.next" "$ensemble_directive"
+  done
+  python3 - "$ensemble_directive" <<'PY' || exit 1
+import json
+import sys
+
+directive = json.load(open(sys.argv[1], encoding="utf-8"))
+if directive.get("kind") != "run-stage" or directive.get("stage") != "user-stories":
+    raise SystemExit(f"official ensemble control did not start user-stories: {directive!r}")
+PY
+  ensemble_engine orchestrate report --single --stage user-stories \
+    --result completed >"$tmp/$harness-ensemble-missing-contribution.json"
+  python3 - "$tmp/$harness-ensemble-missing-contribution.json" <<'PY' || exit 1
+import json
+import sys
+
+directive = json.load(open(sys.argv[1], encoding="utf-8"))
+message = directive.get("message")
+if directive.get("kind") != "error" or not isinstance(message, str) or "collaborator notes are missing" not in message:
+    raise SystemExit(f"official ensemble guard accepted missing support contributions: {directive!r}")
+PY
+
   composed_code_generation="$project/$harness_dir/aidlc-common/stages/construction/code-generation.md"
-  python3 - "$composed_code_generation" "$harness" <<'PY' || exit 1
+  python3 - "$composed_code_generation" "$harness" \
+    "$root/plugins/flow/contributions/construction/code-generation.md" \
+    "$project/$harness_dir/tools/data/plugin-contrib-flow.json" <<'PY' || exit 1
+import json
 import re
 import sys
 
-path, harness = sys.argv[1:]
+path, harness, contribution_path, sidecar_path = sys.argv[1:]
 text = open(path, encoding="utf-8").read()
 match = re.match(r"^---\n(.*?)\n---\n(.*)$", text, re.S)
 if not match:
     raise SystemExit(f"{harness} composed code-generation frontmatter is missing")
 frontmatter, body = match.groups()
-consumes = dict(re.findall(
+consumes = re.findall(
     r"^  - artifact: ([a-z0-9-]+)\n    required: (true|false)(?:\n    conditional_on: \w+)?$",
     frontmatter,
     re.M,
-))
+)
+if len(consumes) != len(set(consumes)):
+    raise SystemExit(f"{harness} composed stage contains duplicate consume entries: {consumes!r}")
 for artifact in ("flow-requirements", "flow-slice-contract"):
-    if consumes.get(artifact) != "true":
+    if consumes.count((artifact, "true")) != 1:
         raise SystemExit(f"{harness} composed stage lost required consume {artifact!r}")
 fragment = re.search(
-    r"<!-- plugin:flow:after-step:1:100:[0-9a-f]+ -->\n(.*?)\n<!-- /plugin:flow:after-step:1:100:[0-9a-f]+ -->",
+    r"<!-- plugin:flow:after-step:1:100:([0-9a-f]{8}) -->\n(.*?)\n<!-- /plugin:flow:after-step:1:100:\1 -->",
     body,
     re.S,
 )
 if not fragment:
-    raise SystemExit(f"{harness} composed stage lost the contract-first fragment")
+    raise SystemExit(f"{harness} composed stage lost exact matching fragment sentinels")
+
+source = open(contribution_path, encoding="utf-8").read()
+source_match = re.search(r"^## fragment: after-step:1\s*$\n(.*)\Z", source, re.M | re.S)
+if not source_match:
+    raise SystemExit("source contribution has no unique after-step:1 prose block")
+source_prose = source_match.group(1).strip()
+if fragment.group(2) != source_prose:
+    raise SystemExit(f"{harness} composed fragment prose differs from its source contribution")
+
+# Official compose hashes JavaScript UTF-16 code units with 32-bit FNV-1a.
+fnv = 0x811C9DC5
+utf16 = source_prose.encode("utf-16-le")
+for index in range(0, len(utf16), 2):
+    fnv ^= int.from_bytes(utf16[index:index + 2], "little")
+    fnv = (fnv * 0x01000193) & 0xFFFFFFFF
+expected_hash = f"{fnv:08x}"
+if fragment.group(1) != expected_hash:
+    raise SystemExit(
+        f"{harness} fragment sentinel hash differs from official FNV-1a: "
+        f"{fragment.group(1)!r} != {expected_hash!r}"
+    )
+
+sidecar = json.load(open(sidecar_path, encoding="utf-8"))
+record = sidecar.get("code-generation")
+if not isinstance(record, dict):
+    raise SystemExit(f"{harness} contribution sidecar has no code-generation record")
+expected_fragments = [{"anchor": "after-step:1", "order": 100, "hash": expected_hash}]
+if record.get("fragments") != expected_fragments:
+    raise SystemExit(
+        f"{harness} contribution sidecar fragment record differs from composed prose: "
+        f"{record.get('fragments')!r}"
+    )
 for required in (
     "flow-requirements.md",
     "flow-slice-contract.md",
@@ -351,7 +469,7 @@ for required in (
     "Merge Safety",
     "TDD",
 ):
-    if required not in fragment.group(1):
+    if required not in fragment.group(2):
         raise SystemExit(f"{harness} composed fragment is missing {required!r}")
 step_1 = body.find("### Step 1: Read All Unit Artifacts")
 step_2 = body.find("### Step 2: PART 1")
@@ -461,6 +579,22 @@ PY
       fail "$harness state verifier accepts mutated $mutation while audit remains valid"
   done
 
+  engine orchestrate report --stage flow-slice-contract \
+    --result awaiting-approval >"$tmp/$harness-contract-missing-artifact.json"
+  python3 - "$tmp/$harness-contract-missing-artifact.json" <<'PY' || exit 1
+import json
+import sys
+
+directive = json.load(open(sys.argv[1], encoding="utf-8"))
+if (
+    directive.get("kind") != "ask"
+    or directive.get("ask_type") != "guard-recovery"
+    or directive.get("stage") != "flow-slice-contract"
+    or directive.get("reason_codes") != ["REQUIRED_ARTIFACTS_MISSING"]
+):
+    raise SystemExit(f"contract gate accepted missing required artifacts: {directive!r}")
+PY
+
   contract_dir="$intent_root/inception/flow-slice-contract"
   mkdir -p "$contract_dir"
   for artifact in flow-requirements flow-slice-contract; do
@@ -487,25 +621,63 @@ directive_path, intent_root, project = sys.argv[1:]
 directive = json.load(open(directive_path, encoding="utf-8"))
 if directive.get("kind") != "run-stage" or directive.get("stage") != "code-generation":
     raise SystemExit(f"unexpected post-contract directive: {directive!r}")
-expected = {
+expected_consumes = [
     os.path.relpath(
         os.path.join(intent_root, "inception", "flow-slice-contract", f"{name}.md"),
         project,
     ).replace(os.sep, "/")
     for name in ("flow-requirements", "flow-slice-contract")
-}
-consumes = set(directive.get("consumes") or [])
-if not expected <= consumes:
-    raise SystemExit(f"contract artifacts are not present inputs: expected {expected!r}, got {consumes!r}")
-absent = directive.get("consumes_absent") or []
-absent_paths = {entry.get("path"): entry.get("expected") for entry in absent}
-for artifact in ("requirements.md", "unit-of-work.md"):
-    matches = [value for path, value in absent_paths.items() if path.endswith("/" + artifact)]
-    if matches != [True]:
-        raise SystemExit(f"expected one explicit zero-Unit fallback for {artifact}: {absent!r}")
-for artifact in expected:
-    if artifact in absent_paths:
-        raise SystemExit(f"present contract artifact was also reported absent: {artifact}")
+]
+consumes = directive.get("consumes")
+if not isinstance(consumes, list) or any(not isinstance(path, str) for path in consumes):
+    raise SystemExit(f"code-generation consumes has an unexpected schema: {consumes!r}")
+if len(consumes) != len(set(consumes)):
+    raise SystemExit(f"code-generation consumes contains duplicate entries: {consumes!r}")
+if consumes != expected_consumes:
+    raise SystemExit(f"contract artifacts are not the exact inputs: expected {expected_consumes!r}, got {consumes!r}")
+for relative, name in zip(consumes, ("flow-requirements", "flow-slice-contract")):
+    if os.path.isabs(relative) or os.path.normpath(relative).replace(os.sep, "/") != relative:
+        raise SystemExit(f"directive consume path is not canonical project-relative: {relative!r}")
+    absolute = os.path.realpath(os.path.join(project, relative))
+    expected_absolute = os.path.realpath(
+        os.path.join(intent_root, "inception", "flow-slice-contract", f"{name}.md")
+    )
+    if absolute != expected_absolute or not os.path.isfile(absolute) or os.path.islink(absolute):
+        raise SystemExit(f"directive consume does not resolve to its canonical artifact: {relative!r}")
+
+expected_absent = [
+    {
+        "path": os.path.relpath(
+            os.path.join(intent_root, "inception", "units-generation", "unit-of-work.md"),
+            project,
+        ).replace(os.sep, "/"),
+        "expected": True,
+    },
+    {
+        "path": os.path.relpath(
+            os.path.join(intent_root, "inception", "requirements-analysis", "requirements.md"),
+            project,
+        ).replace(os.sep, "/"),
+        "expected": True,
+    },
+]
+absent = directive.get("consumes_absent")
+if not isinstance(absent, list) or any(not isinstance(entry, dict) for entry in absent):
+    raise SystemExit(f"code-generation consumes_absent has an unexpected schema: {absent!r}")
+if any(set(entry) != {"path", "expected"} or not isinstance(entry["path"], str) or type(entry["expected"]) is not bool for entry in absent):
+    raise SystemExit(f"code-generation consumes_absent entry schema changed: {absent!r}")
+absent_keys = [(entry["path"], entry["expected"]) for entry in absent]
+if len(absent_keys) != len(set(absent_keys)):
+    raise SystemExit(f"code-generation consumes_absent contains duplicate entries: {absent!r}")
+if absent != expected_absent:
+    raise SystemExit(f"unexpected exact core fallback set: expected {expected_absent!r}, got {absent!r}")
+for entry in absent:
+    relative = entry["path"]
+    if os.path.isabs(relative) or os.path.normpath(relative).replace(os.sep, "/") != relative:
+        raise SystemExit(f"absent consume path is not canonical project-relative: {relative!r}")
+    absolute = os.path.realpath(os.path.join(project, relative))
+    if not absolute.startswith(os.path.realpath(intent_root) + os.sep) or os.path.exists(absolute):
+        raise SystemExit(f"expected absent consume is present or escapes the intent: {relative!r}")
 PY
 
   code_generation_dir="$intent_root/construction/code-generation"
@@ -598,49 +770,190 @@ if directive.get("kind") != "run-stage" or directive.get("stage") != "flow-merge
 PY
 
   engine status > "$tmp/$harness-status.txt"
-  python3 - "$intent_root/aidlc-state.md" "$intent_root/audit" "$tmp/$harness-status.txt" <<'PY' || exit 1
+  python3 - "$intent_root/aidlc-state.md" "$intent_root/audit" \
+    "$tmp/$harness-status.txt" "$project/$harness_dir/tools/data/scope-grid.json" \
+    "$harness" <<'PY' || exit 1
 import glob
+import json
 import os
 import re
 import sys
 
-state_path, audit_dir, status_path = sys.argv[1:]
+state_path, audit_dir, status_path, grid_path, harness = sys.argv[1:]
 state = open(state_path, encoding="utf-8").read()
 status = open(status_path, encoding="utf-8").read()
-current = dict(re.findall(r"^- \*\*(.+?)\*\*: *(.*)$", re.search(r"^## Current Status\n(.*?)(?=^## |\Z)", state, re.M | re.S).group(1), re.M))
-if current.get("Current Stage") != "flow-merge-readiness" or current.get("Lifecycle Phase") != "CONSTRUCTION":
-    raise SystemExit(f"state did not advance to flow-merge-readiness: {current!r}")
-status_fields = dict(re.findall(r"^([A-Za-z ]+):\s+(.*?)\s*$", status, re.M))
-if not (status_fields.get("Current Stage") or "").startswith("Merge Readiness ("):
-    raise SystemExit(f"status did not expose flow-merge-readiness: {status_fields!r}")
+
+def section(name):
+    matches = re.findall(rf"^## {re.escape(name)}\n(.*?)(?=^## |\Z)", state, re.M | re.S)
+    if len(matches) != 1:
+        raise SystemExit(f"state section {name!r} occurs {len(matches)} times")
+    return matches[0]
+
+def unique_fields(text, pattern, owner):
+    pairs = re.findall(pattern, text, re.M)
+    names = [name for name, _ in pairs]
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise SystemExit(f"{owner} has duplicate fields: {duplicates!r}")
+    return dict(pairs)
+
+project_fields = unique_fields(
+    section("Project Information"), r"^- \*\*(.+?)\*\*: *(.*)$", "project state"
+)
+summary = unique_fields(
+    section("Execution Plan Summary"), r"^- \*\*(.+?)\*\*: *(.*)$", "summary state"
+)
+current = unique_fields(
+    section("Current Status"), r"^- \*\*(.+?)\*\*: *(.*)$", "current state"
+)
+resume = unique_fields(
+    section("Session Resume Point"), r"^- \*\*(.+?)\*\*: *(.*)$", "resume state"
+)
+state_expected = {
+    "Scope": (project_fields.get("Scope"), "flow-slice"),
+    "Total Stages": (summary.get("Total Stages"), "8"),
+    "Completed": (summary.get("Completed"), "7"),
+    "In Progress": (summary.get("In Progress"), "flow-merge-readiness"),
+    "Lifecycle Phase": (current.get("Lifecycle Phase"), "CONSTRUCTION"),
+    "Current Stage": (current.get("Current Stage"), "flow-merge-readiness"),
+    "Next Stage": (current.get("Next Stage"), "none"),
+    "Status": (current.get("Status"), "Running"),
+    "Last Completed Stage": (resume.get("Last Completed Stage"), "flow-slice-review"),
+    "Next Action": (resume.get("Next Action"), "Execute Merge Readiness"),
+    "Pending Artifacts": (resume.get("Pending Artifacts"), "none"),
+}
+for label, (actual, expected) in state_expected.items():
+    if actual != expected:
+        raise SystemExit(f"state field {label!r}: expected {expected!r}, got {actual!r}")
+
+grid = json.load(open(grid_path, encoding="utf-8"))["flow-slice"]["stages"]
+progress = section("Stage Progress")
+progress_pairs = re.findall(
+    r"^- \[([ x?RS-])\] ([a-z0-9-]+) — (EXECUTE|SKIP)$", progress, re.M
+)
+stage_names = [stage for _, stage, _ in progress_pairs]
+duplicate_stages = sorted({stage for stage in stage_names if stage_names.count(stage) > 1})
+if duplicate_stages:
+    raise SystemExit(f"state progress has duplicate rows: {duplicate_stages!r}")
+rows = {stage: (checkbox, mode) for checkbox, stage, mode in progress_pairs}
+if set(rows) != set(grid):
+    raise SystemExit("state progress stage set differs from the canonical scope grid")
+expected_execute = {
+    "workspace-scaffold": "x",
+    "workspace-detection": "x",
+    "state-init": "x",
+    "flow-slice-contract": "x",
+    "code-generation": "x",
+    "build-and-test": "x",
+    "flow-slice-review": "x",
+    "flow-merge-readiness": "-",
+}
+actual_execute = {
+    stage: checkbox for stage, (checkbox, mode) in rows.items() if mode == "EXECUTE"
+}
+if actual_execute != expected_execute:
+    raise SystemExit(f"unexpected exact 8-stage progress: {actual_execute!r}")
+for stage, mode in grid.items():
+    checkbox, actual_mode = rows[stage]
+    if actual_mode != mode:
+        raise SystemExit(f"state progress mode differs from scope grid for {stage}")
+    if mode == "SKIP" and checkbox != " ":
+        raise SystemExit(f"skipped stage has unexpected state for {stage}: {checkbox!r}")
+
+status_fields = unique_fields(
+    status, r"^([A-Za-z ]+):[ \t]+(.*?)[ \t]*$", "status output"
+)
+expected_status = {
+    "Project": "local slice smoke test",
+    "Scope": "flow-slice",
+    "Phase": "CONSTRUCTION",
+    "Current Stage": "Merge Readiness (3.9)",
+    "Status": "Running",
+    "Active Agent": "aidlc-delivery-agent",
+    "Change Control": "relaxed (from scope flow-slice)",
+    "Sensors": "on (from scope flow-slice)",
+    "Learnings": "off (from scope flow-slice)",
+    "Summary Confirmation": "off (from scope flow-slice)",
+    "Completion": "7/8 stages (88%)",
+    "Validity": "Untracked completions - advisory; routing continues",
+    "Untracked": "workspace-scaffold, workspace-detection, state-init",
+    "Last Completed": "flow-slice-review",
+    "Next Stage": "none",
+}
+if status_fields != expected_status:
+    raise SystemExit(f"final status differs from its exact contract: {status_fields!r}")
+phase_progress = re.findall(
+    r"^Phase Progress:\n((?:  [A-Z]+[ \t]+[^\n]+\n){3})", status, re.M
+)
+expected_phase_progress = (
+    "  INITIALIZATION   ███ 3/3\n"
+    "  INCEPTION        █ 1/1\n"
+    "  CONSTRUCTION     ███▒ 3/4\n"
+)
+if phase_progress != [expected_phase_progress]:
+    raise SystemExit(f"final phase progress differs from its exact contract: {phase_progress!r}")
+
 events = []
-for path in glob.glob(os.path.join(audit_dir, "*.md")):
+for path in sorted(glob.glob(os.path.join(audit_dir, "*.md"))):
     for block in re.split(r"\n---\n", open(path, encoding="utf-8").read()):
-        fields = dict(re.findall(r"^\*\*(.+?)\*\*: *(.*)$", block, re.M))
+        fields = unique_fields(
+            block, r"^\*\*(.+?)\*\*: *(.*)$", f"audit block in {path}"
+        )
         if "Event" in fields:
             events.append(fields)
-needed = {
+
+lifecycle = (
+    "STAGE_STARTED",
     "STAGE_AWAITING_APPROVAL",
     "GATE_APPROVED",
     "STAGE_COMPLETED",
-}
-seen = {event.get("Event") for event in events if event.get("Stage") == "flow-slice-contract"}
-if not needed <= seen:
-    raise SystemExit(f"contract approval lifecycle is incomplete: {sorted(seen)!r}")
-for stage in ("code-generation", "build-and-test", "flow-slice-review"):
-    stage_events = {event.get("Event") for event in events if event.get("Stage") == stage}
-    if not needed <= stage_events:
-        raise SystemExit(f"{stage} lifecycle is incomplete: {sorted(stage_events)!r}")
-if not any(event.get("Event") == "STAGE_STARTED" and event.get("Stage") == "flow-merge-readiness" for event in events):
-    raise SystemExit("audit does not start flow-merge-readiness")
+)
+completed_stages = (
+    "flow-slice-contract",
+    "code-generation",
+    "build-and-test",
+    "flow-slice-review",
+)
+for stage in completed_stages:
+    indices = {}
+    for event_name in lifecycle:
+        matches = [
+            index for index, event in enumerate(events)
+            if event.get("Event") == event_name and event.get("Stage") == stage
+        ]
+        if len(matches) != 1:
+            raise SystemExit(f"audit event {event_name} for {stage} occurs {len(matches)} times")
+        indices[event_name] = matches[0]
+    humans = [
+        index for index, event in enumerate(events)
+        if event.get("Event") == "HUMAN_TURN"
+        and event.get("Session") == f"integration-{harness}"
+        and indices["STAGE_AWAITING_APPROVAL"] < index < indices["GATE_APPROVED"]
+    ]
+    if len(humans) != 1:
+        raise SystemExit(f"audit HUMAN_TURN for {stage} occurs {len(humans)} times")
+    actual_order = [
+        indices["STAGE_STARTED"],
+        indices["STAGE_AWAITING_APPROVAL"],
+        humans[0],
+        indices["GATE_APPROVED"],
+        indices["STAGE_COMPLETED"],
+    ]
+    if actual_order != sorted(actual_order) or len(set(actual_order)) != 5:
+        raise SystemExit(f"audit lifecycle is out of order for {stage}: {actual_order!r}")
 
-progress = re.search(r"^## Stage Progress\n(.*?)(?=^## |\Z)", state, re.M | re.S).group(1)
-rows = dict((stage, checkbox) for checkbox, stage in re.findall(r"^- \[([ x?RS-])\] ([a-z0-9-]+) — EXECUTE$", progress, re.M))
-for stage in ("flow-slice-contract", "code-generation", "build-and-test", "flow-slice-review"):
-    if rows.get(stage) != "x":
-        raise SystemExit(f"stage is not completed in official state: {stage}={rows.get(stage)!r}")
-if rows.get("flow-merge-readiness") != "-":
-    raise SystemExit(f"merge readiness is not active in official state: {rows.get('flow-merge-readiness')!r}")
+all_humans = [
+    event for event in events
+    if event.get("Event") == "HUMAN_TURN" and event.get("Session") == f"integration-{harness}"
+]
+if len(all_humans) != len(completed_stages):
+    raise SystemExit(f"audit contains unexpected HUMAN_TURN rows: {len(all_humans)}")
+readiness_lifecycle = [
+    event.get("Event") for event in events
+    if event.get("Stage") == "flow-merge-readiness" and event.get("Event") in lifecycle
+]
+if readiness_lifecycle != ["STAGE_STARTED"]:
+    raise SystemExit(f"merge readiness audit is not exactly active: {readiness_lifecycle!r}")
 PY
 
   case "$harness" in
