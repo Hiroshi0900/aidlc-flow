@@ -73,7 +73,9 @@ case "$*" in
     if [ -n "${CLAUDE_MARKETPLACES_JSON:-}" ]; then printf '%s\n' "$CLAUDE_MARKETPLACES_JSON"; else printf '%s\n' '[]'; fi
     ;;
   'plugin list --json')
-    if [ -f "${HOST_FAKE_CLAUDE_UPDATED:-/nonexistent}" ] && [ -n "${CLAUDE_PLUGINS_AFTER_JSON:-}" ]; then
+    if [ -f "${HOST_FAKE_CLAUDE_ENABLED:-/nonexistent}" ] && [ -n "${CLAUDE_PLUGINS_ENABLED_JSON:-}" ]; then
+      printf '%s\n' "$CLAUDE_PLUGINS_ENABLED_JSON"
+    elif [ -f "${HOST_FAKE_CLAUDE_UPDATED:-/nonexistent}" ] && [ -n "${CLAUDE_PLUGINS_AFTER_JSON:-}" ]; then
       printf '%s\n' "$CLAUDE_PLUGINS_AFTER_JSON"
     elif [ -n "${CLAUDE_PLUGINS_JSON:-}" ]; then printf '%s\n' "$CLAUDE_PLUGINS_JSON"; else printf '%s\n' '[]'; fi
     ;;
@@ -83,6 +85,10 @@ case "$*" in
     rm -rf "$HOST_FAKE_CLAUDE_CACHE"
     cp -R "$HOST_FAKE_CLAUDE_PROJECTION" "$HOST_FAKE_CLAUDE_CACHE"
     touch "$HOST_FAKE_CLAUDE_UPDATED"
+    ;;
+  'plugin enable --scope project '*)
+    [ "${HOST_FAKE_ENABLE_STATUS:-0}" -eq 0 ] || exit "$HOST_FAKE_ENABLE_STATUS"
+    touch "$HOST_FAKE_CLAUDE_ENABLED"
     ;;
   *) exit 92 ;;
 esac
@@ -220,9 +226,45 @@ aidlc|$project|engine plugin sync|harness=.claude/claude" "same Claude source is
 unset CLAUDE_MARKETPLACES_JSON CLAUDE_PLUGINS_JSON
 
 : > "$HOST_FAKE_LOG"
+HOST_FAKE_CLAUDE_ENABLED="$tmp/claude-enabled"
+CLAUDE_MARKETPLACES_JSON="[{\"name\":\"aidlc-plugins\",\"source\":\"directory\",\"path\":\"$projection_root/claude\",\"installLocation\":\"$projection_root/claude\"}]"
+CLAUDE_PLUGINS_JSON="[{\"id\":\"aidlc-flow@aidlc-plugins\",\"version\":\"0.1.0\",\"scope\":\"project\",\"enabled\":false,\"projectPath\":\"$project\",\"installPath\":\"$claude_cache\"}]"
+CLAUDE_PLUGINS_ENABLED_JSON="[{\"id\":\"aidlc-flow@aidlc-plugins\",\"version\":\"0.1.0\",\"scope\":\"project\",\"enabled\":true,\"projectPath\":\"$project\",\"installPath\":\"$claude_cache\"}]"
+export HOST_FAKE_CLAUDE_ENABLED CLAUDE_MARKETPLACES_JSON CLAUDE_PLUGINS_JSON CLAUDE_PLUGINS_ENABLED_JSON
+install_flow_plugin "$project" claude "$projection_root/claude"
+assert_contains "$(cat "$HOST_FAKE_LOG")" "plugin enable --scope project aidlc-flow@aidlc-plugins" "disabled current Claude plugin is re-enabled"
+: > "$HOST_FAKE_LOG"
+install_flow_plugin "$project" claude "$projection_root/claude"
+case "$(cat "$HOST_FAKE_LOG")" in *'plugin enable '*|*'plugin update '*|*'plugin install '*) fail "re-enabled current Claude plugin must be host-idempotent" ;; esac
+rm -f "$HOST_FAKE_CLAUDE_ENABLED"
+: > "$HOST_FAKE_LOG"
+HOST_FAKE_ENABLE_STATUS=42
+export HOST_FAKE_ENABLE_STATUS
+set +e
+install_flow_plugin "$project" claude "$projection_root/claude" >/dev/null 2>&1
+enable_failure_status=$?
+set -e
+assert_eq "$enable_failure_status" 42 "Claude enable failure propagates"
+case "$(cat "$HOST_FAKE_LOG")" in *'config project'*|*'engine plugin sync'*) fail "Claude enable failure must stop before AI-DLC" ;; esac
+unset HOST_FAKE_ENABLE_STATUS HOST_FAKE_CLAUDE_ENABLED CLAUDE_MARKETPLACES_JSON CLAUDE_PLUGINS_JSON CLAUDE_PLUGINS_ENABLED_JSON
+
+: > "$HOST_FAKE_LOG"
+CLAUDE_MARKETPLACES_JSON="[{\"name\":\"aidlc-plugins\",\"source\":\"directory\",\"path\":\"$projection_root/claude\",\"installLocation\":\"$projection_root/claude\"}]"
+CLAUDE_PLUGINS_JSON="[{\"id\":\"aidlc-flow@aidlc-plugins\",\"version\":\"0.1.0\",\"scope\":\"project\",\"enabled\":\"false\",\"projectPath\":\"$project\",\"installPath\":\"$claude_cache\"}]"
+export CLAUDE_MARKETPLACES_JSON CLAUDE_PLUGINS_JSON
+set +e
+invalid_enabled_output=$(install_flow_plugin "$project" claude "$projection_root/claude" 2>&1)
+invalid_enabled_status=$?
+set -e
+assert_eq "$invalid_enabled_status" 1 "non-boolean Claude enabled state is rejected"
+assert_contains "$invalid_enabled_output" "invalid Claude plugin inventory or cache" "invalid enabled state has an inventory diagnostic"
+case "$(cat "$HOST_FAKE_LOG")" in *'plugin enable '*|*'plugin update '*|*'plugin install '*|*'config project'*) fail "invalid enabled state must stop before mutation" ;; esac
+unset CLAUDE_MARKETPLACES_JSON CLAUDE_PLUGINS_JSON
+
+: > "$HOST_FAKE_LOG"
 printf '%s\n' 'changed Claude payload' >> "$projection_root/claude/scopes/flow-slice.md"
 CLAUDE_MARKETPLACES_JSON="[{\"name\":\"aidlc-plugins\",\"source\":\"directory\",\"path\":\"$projection_root/claude\",\"installLocation\":\"$projection_root/claude\"}]"
-CLAUDE_PLUGINS_JSON="[{\"id\":\"aidlc-flow@aidlc-plugins\",\"version\":\"0.1.0\",\"scope\":\"project\",\"enabled\":true,\"projectPath\":\"$project\",\"installPath\":\"$claude_cache\"}]"
+CLAUDE_PLUGINS_JSON="[{\"id\":\"aidlc-flow@aidlc-plugins\",\"version\":\"0.1.0\",\"scope\":\"project\",\"enabled\":false,\"projectPath\":\"$project\",\"installPath\":\"$claude_cache\"}]"
 export CLAUDE_MARKETPLACES_JSON CLAUDE_PLUGINS_JSON
 set +e
 same_version_output=$(install_flow_plugin "$project" claude "$projection_root/claude" 2>&1)
@@ -236,13 +278,24 @@ perl -pi -e 's/0\.1\.0/0.1.1/g' "$projection_root/claude/.claude-plugin/plugin.j
 claude_cache="$tmp/claude-config/plugins/cache/aidlc-plugins/aidlc-flow/0.1.1"
 HOST_FAKE_CLAUDE_CACHE="$claude_cache"
 HOST_FAKE_CLAUDE_UPDATED="$tmp/claude-updated"
-CLAUDE_PLUGINS_AFTER_JSON="[{\"id\":\"aidlc-flow@aidlc-plugins\",\"version\":\"0.1.1\",\"scope\":\"project\",\"enabled\":true,\"projectPath\":\"$project\",\"installPath\":\"$claude_cache\"}]"
-export HOST_FAKE_CLAUDE_CACHE HOST_FAKE_CLAUDE_UPDATED CLAUDE_PLUGINS_AFTER_JSON
+HOST_FAKE_CLAUDE_ENABLED="$tmp/claude-enabled-after-update"
+CLAUDE_PLUGINS_AFTER_JSON="[{\"id\":\"aidlc-flow@aidlc-plugins\",\"version\":\"0.1.1\",\"scope\":\"project\",\"enabled\":false,\"projectPath\":\"$project\",\"installPath\":\"$claude_cache\"}]"
+CLAUDE_PLUGINS_ENABLED_JSON="[{\"id\":\"aidlc-flow@aidlc-plugins\",\"version\":\"0.1.1\",\"scope\":\"project\",\"enabled\":true,\"projectPath\":\"$project\",\"installPath\":\"$claude_cache\"}]"
+export HOST_FAKE_CLAUDE_CACHE HOST_FAKE_CLAUDE_UPDATED HOST_FAKE_CLAUDE_ENABLED CLAUDE_PLUGINS_AFTER_JSON CLAUDE_PLUGINS_ENABLED_JSON
 : > "$HOST_FAKE_LOG"
 install_flow_plugin "$project" claude "$projection_root/claude"
+assert_eq "$(cat "$HOST_FAKE_LOG")" "claude|$project|plugin marketplace list --json
+claude|$project|plugin list --json
+claude|$project|plugin update --scope project --yes aidlc-flow@aidlc-plugins
+claude|$project|plugin list --json
+claude|$project|plugin enable --scope project aidlc-flow@aidlc-plugins
+claude|$project|plugin list --json
+aidlc|$project|config project --project-dir $project --plugins flow --yes|harness=/
+aidlc|$project|engine plugin sync|harness=.claude/claude" "disabled Claude version update is verified before enable and sync"
 assert_contains "$(cat "$HOST_FAKE_LOG")" "plugin update --scope project --yes aidlc-flow@aidlc-plugins" "new Claude version uses the supported project update path"
+assert_contains "$(cat "$HOST_FAKE_LOG")" "plugin enable --scope project aidlc-flow@aidlc-plugins" "disabled Claude version is enabled after update"
 assert_contains "$(cat "$claude_cache/scopes/flow-slice.md")" "changed Claude payload" "Claude version update installs changed payload"
-unset CLAUDE_MARKETPLACES_JSON CLAUDE_PLUGINS_JSON CLAUDE_PLUGINS_AFTER_JSON HOST_FAKE_CLAUDE_UPDATED
+unset CLAUDE_MARKETPLACES_JSON CLAUDE_PLUGINS_JSON CLAUDE_PLUGINS_AFTER_JSON CLAUDE_PLUGINS_ENABLED_JSON HOST_FAKE_CLAUDE_UPDATED HOST_FAKE_CLAUDE_ENABLED
 
 for update_harness in codex claude; do
   perl -pi -e 's/0\.1\.1/0.1.2/g' "$projection_root/$update_harness/.$update_harness-plugin/plugin.json" "$projection_root/$update_harness/.$update_harness-plugin/marketplace.json"

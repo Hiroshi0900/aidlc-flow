@@ -76,6 +76,22 @@ for harness in codex claude; do
   projection="$tmp/share/aidlc-flow/plugin-dist/$harness"
   : > "$REAL_HOST_LOG"
   install_flow_plugin "$project" "$harness" "$projection" >/dev/null
+  if [ "$harness" = claude ]; then
+    (cd "$project" && "$real_claude" plugin disable --scope project aidlc-flow@aidlc-plugins >/dev/null)
+    : > "$REAL_HOST_LOG"
+    install_flow_plugin "$project" "$harness" "$projection" >/dev/null
+    assert_contains "$(cat "$REAL_HOST_LOG")" "claude|plugin enable --scope project aidlc-flow@aidlc-plugins" "disabled Claude project plugin is re-enabled"
+    host_list "$harness" > "$tmp/claude-reenabled.json"
+    python3 - "$tmp/claude-reenabled.json" <<'PY' || fail "Claude project plugin remained disabled"
+import json, sys
+matches = [entry for entry in json.load(open(sys.argv[1], encoding="utf-8")) if entry.get("id") == "aidlc-flow@aidlc-plugins" and entry.get("scope") == "project"]
+if len(matches) != 1 or matches[0].get("enabled") is not True:
+    raise SystemExit("plugin is not enabled")
+PY
+    : > "$REAL_HOST_LOG"
+    install_flow_plugin "$project" "$harness" "$projection" >/dev/null
+    case "$(cat "$REAL_HOST_LOG")" in *'plugin enable '*|*'plugin update '*|*'plugin install '*) fail "re-enabled Claude plugin must be host-idempotent" ;; esac
+  fi
   host_list "$harness" > "$tmp/$harness-before.json"
   project_before=$(project_digest)
   case "$harness" in

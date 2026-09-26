@@ -309,16 +309,19 @@ elif harness == "claude":
         raise SystemExit("ambiguous Claude project plugin inventory")
     installed = project_matches[0].get("installPath")
     installed_version = project_matches[0].get("version")
+    enabled = project_matches[0].get("enabled")
     if not isinstance(installed, str) or not isinstance(installed_version, str) or not re.fullmatch(semver, installed_version):
         raise SystemExit("Claude project plugin inventory has no installPath")
+    if not isinstance(enabled, bool):
+        raise SystemExit("Claude project plugin inventory has no boolean enabled state")
     cache_root = os.path.realpath(os.path.join(os.environ.get("CLAUDE_CONFIG_DIR", os.path.join(os.path.expanduser("~"), ".claude")), "plugins", "cache"))
     installed_real = os.path.realpath(installed)
     if os.path.commonpath((cache_root, installed_real)) != cache_root:
         raise SystemExit("Claude plugin installPath escapes the host cache")
     if installed_version != projection_version:
-        print("version-changed")
+        print("version-changed" if enabled else "disabled-version-changed")
     elif source_hash(installed) == projection_hash:
-        print("current")
+        print("current" if enabled else "disabled-current")
     else:
         print("same-version-mismatch")
 else:
@@ -449,6 +452,28 @@ PY
           claude plugin list --json > "$aidlc_flow_plugins"
           [ "$(flow_plugin_cache_state claude "$aidlc_flow_plugins" "$aidlc_flow_projection" "$aidlc_flow_project")" = current ] || {
             plugin_install_die "Claude plugin cache did not refresh"
+            exit 1
+          }
+          ;;
+        disabled-current)
+          claude plugin enable --scope project aidlc-flow@aidlc-plugins
+          claude plugin list --json > "$aidlc_flow_plugins"
+          [ "$(flow_plugin_cache_state claude "$aidlc_flow_plugins" "$aidlc_flow_projection" "$aidlc_flow_project")" = current ] || {
+            plugin_install_die "Claude plugin did not become enabled"
+            exit 1
+          }
+          ;;
+        disabled-version-changed)
+          claude plugin update --scope project --yes aidlc-flow@aidlc-plugins
+          claude plugin list --json > "$aidlc_flow_plugins"
+          [ "$(flow_plugin_cache_state claude "$aidlc_flow_plugins" "$aidlc_flow_projection" "$aidlc_flow_project")" = disabled-current ] || {
+            plugin_install_die "Claude disabled plugin cache did not refresh"
+            exit 1
+          }
+          claude plugin enable --scope project aidlc-flow@aidlc-plugins
+          claude plugin list --json > "$aidlc_flow_plugins"
+          [ "$(flow_plugin_cache_state claude "$aidlc_flow_plugins" "$aidlc_flow_projection" "$aidlc_flow_project")" = current ] || {
+            plugin_install_die "Claude plugin did not become enabled"
             exit 1
           }
           ;;
