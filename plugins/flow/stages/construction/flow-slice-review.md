@@ -1,7 +1,7 @@
 ---
-slug: slice-review
+slug: flow-slice-review
 name: Slice Review
-plugin: flow-slice
+plugin: flow
 phase: construction
 execution: ALWAYS
 condition: Review the tested slice once after Build and Test succeeds.
@@ -9,9 +9,9 @@ lead_agent: aidlc-architecture-reviewer-agent
 support_agents: []
 mode: subagent
 produces:
-  - slice-review
+  - flow-slice-review
 consumes:
-  - artifact: slice-contract
+  - artifact: flow-slice-contract
     required: true
   - artifact: code-summary
     required: true
@@ -22,13 +22,13 @@ requires_stage:
 sensors:
   - required-sections
 scopes:
-  - aidlc-flow-slice
+  - flow-slice
 required_sections:
   - Spec Compliance
   - Findings
   - Verdict
 inputs: The approved slice contract, implementation summary, source diff, and passing test evidence
-outputs: slice-review.md under the engine-resolved record directory
+outputs: flow-slice-review.md under the engine-resolved record directory
 ---
 
 # Slice Review

@@ -1,7 +1,7 @@
 ---
 target: workspace-scaffold
-plugin: flow-slice
+plugin: flow
 adds:
   scopes:
-    - aidlc-flow-slice
+    - flow-slice
 ---

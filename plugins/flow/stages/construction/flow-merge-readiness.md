@@ -1,7 +1,7 @@
 ---
-slug: merge-readiness
+slug: flow-merge-readiness
 name: Merge Readiness
-plugin: flow-slice
+plugin: flow
 phase: construction
 execution: ALWAYS
 condition: Verify local, pull-request, and human approval evidence before merging to main.
@@ -9,25 +9,25 @@ lead_agent: aidlc-delivery-agent
 support_agents: []
 mode: inline
 produces:
-  - merge-readiness
+  - flow-merge-readiness
 consumes:
-  - artifact: slice-review
+  - artifact: flow-slice-review
     required: true
   - artifact: build-test-results
     required: true
 requires_stage:
-  - slice-review
+  - flow-slice-review
 sensors:
   - required-sections
 scopes:
-  - aidlc-flow-slice
+  - flow-slice
 required_sections:
   - Local Readiness
   - Pull Request Readiness
   - Unverified Items
   - Measurements
 inputs: Passing tests, the approved review, Git state, pull-request checks, and human approvals
-outputs: merge-readiness.md under the engine-resolved record directory
+outputs: flow-merge-readiness.md under the engine-resolved record directory
 ---
 
 # Merge Readiness

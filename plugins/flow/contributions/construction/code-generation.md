@@ -1,7 +1,7 @@
 ---
 target: code-generation
-plugin: flow-slice
+plugin: flow
 adds:
   scopes:
-    - aidlc-flow-slice
+    - flow-slice
 ---

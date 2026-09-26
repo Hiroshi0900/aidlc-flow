@@ -1,6 +1,6 @@
 ---
-name: aidlc-flow-slice
-plugin: flow-slice
+name: flow-slice
+plugin: flow
 depth: Minimal
 testStrategy: Standard
 keywords:
@@ -17,7 +17,7 @@ learnings: off
 summary_confirmation: off
 ---
 
-# aidlc-flow-slice scope
+# flow-slice scope
 
 Use one intent, one branch, and one pull request for a small user-visible slice.
 The path is Slice Contract, Code Generation, Build and Test, Slice Review, and
