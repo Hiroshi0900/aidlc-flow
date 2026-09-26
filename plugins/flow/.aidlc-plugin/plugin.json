@@ -1,6 +1,6 @@
 {
   "name": "flow",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Deliver one vertical slice through test, review, and merge readiness.",
   "author": { "name": "aidlc-flow" },
   "dependencies": ["core"],

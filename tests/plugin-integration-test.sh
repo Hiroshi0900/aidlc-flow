@@ -230,7 +230,77 @@ run_harness() {
       "$aidlc_for_harness" engine "$@" </dev/null)
   }
 
-  engine graph validate-scope flow-slice >/dev/null
+  record_human_turn() {
+    response=$1
+    printf '{"hook_event_name":"UserPromptSubmit","session_id":"integration-%s","prompt":"%s"}\n' \
+      "$harness" "$response" |
+      (cd "$project" && HOME="$isolated_home" CODEX_HOME="$codex_home" \
+        CLAUDE_CONFIG_DIR="$claude_config" AIDLC_HARNESS_DIR="$harness_dir" \
+        AIDLC_HARNESS_NAME="$harness" PATH="$isolated_home/.local/bin:$PATH" \
+        "$real_bun" "$project/$harness_dir/hooks/aidlc-record-human-turn.ts")
+  }
+
+  finish_steering() {
+    directive_path=$1
+    while [ "$(python3 - "$directive_path" <<'PY'
+import json
+import sys
+
+print(json.load(open(sys.argv[1], encoding="utf-8")).get("kind", ""))
+PY
+    )" = load-steering ]; do
+      steering_token=$(python3 - "$directive_path" <<'PY'
+import json
+import sys
+
+print(json.load(open(sys.argv[1], encoding="utf-8"))["continue_token"])
+PY
+      )
+      engine orchestrate continue "$steering_token" >"$directive_path.next"
+      mv "$directive_path.next" "$directive_path"
+    done
+  }
+
+  approve_stage() {
+    stage=$1
+    engine orchestrate report --stage "$stage" \
+      --result awaiting-approval >"$tmp/$harness-$stage-gate.json"
+    record_human_turn Approve
+    engine orchestrate report --stage "$stage" \
+      --result approved --user-input Approve >"$tmp/$harness-$stage-approved.json"
+    python3 - "$tmp/$harness-$stage-gate.json" \
+      "$tmp/$harness-$stage-approved.json" "$stage" <<'PY' || exit 1
+import json
+import sys
+
+gate_path, approved_path, stage = sys.argv[1:]
+gate = json.load(open(gate_path, encoding="utf-8"))
+approved = json.load(open(approved_path, encoding="utf-8"))
+if gate.get("kind") != "print" or approved.get("kind") != "done":
+    raise SystemExit(f"{stage} approval did not complete through official reports: {gate!r}, {approved!r}")
+PY
+  }
+
+  graph_stderr="$tmp/$harness-graph-stderr.txt"
+  engine graph validate-scope flow-slice >/dev/null 2>"$graph_stderr"
+  python3 - "$graph_stderr" <<'PY' || exit 1
+import re
+import sys
+
+lines = [line.strip() for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+expected = {
+    'Stage "code-generation" requires artifact "unit-of-work" whose producer(s) [units-generation] are not on the "flow-slice" path.',
+    'Stage "code-generation" requires artifact "requirements" whose producer(s) [requirements-analysis] are not on the "flow-slice" path.',
+}
+actual = set()
+for line in lines:
+    match = re.fullmatch(r"\[advisory\] (.*) Ensure existing artifact is current\.", line)
+    if not match:
+        raise SystemExit(f"unexpected graph validation stderr: {line!r}")
+    actual.add(match.group(1))
+if actual != expected or len(lines) != 2:
+    raise SystemExit(f"expected exactly the zero-Unit fallback advisories, got: {lines!r}")
+PY
   engine graph scope flow-slice > "$tmp/$harness-scope.txt"
   assert_scope_graph "$tmp/$harness-scope.txt" \
     "$project/$harness_dir/tools/data/scope-grid.json"
@@ -246,6 +316,64 @@ run_harness() {
       "$aidlc_for_harness" doctor --project-dir "$project" --verbose </dev/null
     fail "$harness AI-DLC doctor failed"
   fi
+
+  composed_code_generation="$project/$harness_dir/aidlc-common/stages/construction/code-generation.md"
+  python3 - "$composed_code_generation" "$harness" <<'PY' || exit 1
+import re
+import sys
+
+path, harness = sys.argv[1:]
+text = open(path, encoding="utf-8").read()
+match = re.match(r"^---\n(.*?)\n---\n(.*)$", text, re.S)
+if not match:
+    raise SystemExit(f"{harness} composed code-generation frontmatter is missing")
+frontmatter, body = match.groups()
+consumes = dict(re.findall(
+    r"^  - artifact: ([a-z0-9-]+)\n    required: (true|false)(?:\n    conditional_on: \w+)?$",
+    frontmatter,
+    re.M,
+))
+for artifact in ("flow-requirements", "flow-slice-contract"):
+    if consumes.get(artifact) != "true":
+        raise SystemExit(f"{harness} composed stage lost required consume {artifact!r}")
+fragment = re.search(
+    r"<!-- plugin:flow:after-step:1:100:[0-9a-f]+ -->\n(.*?)\n<!-- /plugin:flow:after-step:1:100:[0-9a-f]+ -->",
+    body,
+    re.S,
+)
+if not fragment:
+    raise SystemExit(f"{harness} composed stage lost the contract-first fragment")
+for required in (
+    "flow-requirements.md",
+    "flow-slice-contract.md",
+    "Acceptance Criteria",
+    "Boundary Test",
+    "Merge Safety",
+    "TDD",
+):
+    if required not in fragment.group(1):
+        raise SystemExit(f"{harness} composed fragment is missing {required!r}")
+step_1 = body.find("### Step 1: Read All Unit Artifacts")
+step_2 = body.find("### Step 2: PART 1")
+if not step_1 < fragment.start() < step_2:
+    raise SystemExit(f"{harness} contract fragment is not immediately after Step 1")
+PY
+
+  compose_drops="$project/aidlc/spaces/default/intents/.aidlc-engine/hooks-health/plugin-compose-flow.drops"
+  python3 - "$compose_drops" "$harness" <<'PY' || exit 1
+import sys
+
+path, harness = sys.argv[1:]
+lines = open(path, encoding="utf-8").read().splitlines() if __import__("os").path.exists(path) else []
+unexpected = [
+    line for line in lines
+    if "[degraded]" in line
+    or "contribution to code-generation" in line
+    or 'contribution "code-generation.md"' in line
+]
+if unexpected:
+    raise SystemExit(f"{harness} compose dropped the intended code-generation merge: {unexpected!r}")
+PY
 
   directive="$tmp/$harness-create-directive.json"
   engine orchestrate next --scope flow-slice -- "local slice smoke test" > "$directive"
@@ -311,10 +439,11 @@ if directive.get("kind") not in ("load-steering", "run-stage") or directive.get(
     raise SystemExit(f"unexpected first workflow directive: {directive!r}")
 PY
 
-  engine status > "$tmp/$harness-status.txt"
-  verify_intent_state "$intent_root/aidlc-state.md" "$project/$harness_dir/tools/data/scope-grid.json"
+  engine status >"$tmp/$harness-contract-status.txt"
+  verify_intent_state "$intent_root/aidlc-state.md" \
+    "$project/$harness_dir/tools/data/scope-grid.json"
   verify_intent_audit "$intent_root/audit"
-  verify_intent_status "$tmp/$harness-status.txt"
+  verify_intent_status "$tmp/$harness-contract-status.txt"
 
   for mutation in scope current-stage; do
     mutated_state="$tmp/$harness-$mutation-state.md"
@@ -324,11 +453,195 @@ PY
       current-stage) perl -pi -e 's/^(- \*\*Current Stage\*\*: )flow-slice-contract$/${1}code-generation/' "$mutated_state" ;;
     esac
     set +e
-    verify_intent_state "$mutated_state" "$project/$harness_dir/tools/data/scope-grid.json" >/dev/null 2>&1
+    verify_intent_state "$mutated_state" \
+      "$project/$harness_dir/tools/data/scope-grid.json" >/dev/null 2>&1
     mutation_status=$?
     set -e
-    [ "$mutation_status" -ne 0 ] || fail "$harness state verifier accepts mutated $mutation while audit remains valid"
+    [ "$mutation_status" -ne 0 ] || \
+      fail "$harness state verifier accepts mutated $mutation while audit remains valid"
   done
+
+  contract_dir="$intent_root/inception/flow-slice-contract"
+  mkdir -p "$contract_dir"
+  for artifact in flow-requirements flow-slice-contract; do
+    artifact_path="$contract_dir/$artifact.md"
+    {
+      printf '# Approved Slice Contract\n\n'
+      printf '## Acceptance Criteria\n\n- AC-1: The local slice is observable.\n\n'
+      printf '## Boundary Test\n\n- The integration boundary fails before implementation.\n\n'
+      printf '## Merge Safety\n\n- Safe in one pull request without a feature flag.\n'
+    } >"$artifact_path"
+  done
+
+  approve_stage flow-slice-contract
+
+  code_generation_directive="$tmp/$harness-code-generation-directive.json"
+  engine orchestrate next --scope flow-slice >"$code_generation_directive"
+  finish_steering "$code_generation_directive"
+  python3 - "$code_generation_directive" "$intent_root" "$project" <<'PY' || exit 1
+import json
+import os
+import sys
+
+directive_path, intent_root, project = sys.argv[1:]
+directive = json.load(open(directive_path, encoding="utf-8"))
+if directive.get("kind") != "run-stage" or directive.get("stage") != "code-generation":
+    raise SystemExit(f"unexpected post-contract directive: {directive!r}")
+expected = {
+    os.path.relpath(
+        os.path.join(intent_root, "inception", "flow-slice-contract", f"{name}.md"),
+        project,
+    ).replace(os.sep, "/")
+    for name in ("flow-requirements", "flow-slice-contract")
+}
+consumes = set(directive.get("consumes") or [])
+if not expected <= consumes:
+    raise SystemExit(f"contract artifacts are not present inputs: expected {expected!r}, got {consumes!r}")
+absent = directive.get("consumes_absent") or []
+absent_paths = {entry.get("path"): entry.get("expected") for entry in absent}
+for artifact in ("requirements.md", "unit-of-work.md"):
+    matches = [value for path, value in absent_paths.items() if path.endswith("/" + artifact)]
+    if matches != [True]:
+        raise SystemExit(f"expected one explicit zero-Unit fallback for {artifact}: {absent!r}")
+for artifact in expected:
+    if artifact in absent_paths:
+        raise SystemExit(f"present contract artifact was also reported absent: {artifact}")
+PY
+
+  code_generation_dir="$intent_root/construction/code-generation"
+  mkdir -p "$code_generation_dir" "$project/src"
+  {
+    printf '# Code Generation Plan\n\n'
+    printf -- '- [x] AC-1: run the boundary test Red, implement Green, then refactor.\n\n'
+    printf '## Testing Contract\n\n```json\n{"methodology":"TDD","ordering":"Red, Green, Refactor"}\n```\n'
+  } >"$code_generation_dir/code-generation-plan.md"
+  {
+    printf '# Unit Test Instructions\n\n'
+    printf 'Run `/bin/sh tests/boundary-test.sh` for AC-1.\n'
+  } >"$code_generation_dir/unit-test-instructions.md"
+  {
+    printf '# Code Summary\n\n'
+    printf 'AC-1 is implemented in `src/slice.js` and verified by the boundary test.\n'
+  } >"$code_generation_dir/code-summary.md"
+  printf '%s\n' '{"stage":"code-generation","upstream_ids":["AC-1"],"coverage":[{"id":"AC-1","status":"OK","target":"src/slice.js"}],"reverse":[{"id":"AC-1","status":"OK","target":"src/slice.js"}]}' \
+    >"$code_generation_dir/traceability.json"
+  printf '%s\n' 'export const sliceReady = true;' >"$project/src/slice.js"
+
+  approve_stage code-generation
+
+  build_directive="$tmp/$harness-build-and-test-directive.json"
+  engine orchestrate next --scope flow-slice >"$build_directive"
+  finish_steering "$build_directive"
+  python3 - "$build_directive" <<'PY' || exit 1
+import json
+import sys
+
+directive = json.load(open(sys.argv[1], encoding="utf-8"))
+if directive.get("kind") != "run-stage" or directive.get("stage") != "build-and-test":
+    raise SystemExit(f"unexpected build-and-test directive: {directive!r}")
+PY
+
+  build_dir="$intent_root/construction/build-and-test"
+  mkdir -p "$build_dir/contributions"
+  printf '%s\n' '**Collaborator:** aidlc-devsecops-agent' \
+    >"$build_dir/contributions/aidlc-devsecops-agent.md"
+  for artifact in \
+    build-instructions \
+    integration-test-instructions \
+    performance-test-instructions \
+    security-test-instructions \
+    build-and-test-summary \
+    build-test-results \
+    cross-unit-traceability
+  do
+    {
+      printf '# Build and Test Evidence\n\n'
+      printf '## Result\n\nPASS for AC-1.\n'
+    } >"$build_dir/$artifact.md"
+  done
+
+  approve_stage build-and-test
+
+  review_directive="$tmp/$harness-flow-slice-review-directive.json"
+  engine orchestrate next --scope flow-slice >"$review_directive"
+  finish_steering "$review_directive"
+  python3 - "$review_directive" <<'PY' || exit 1
+import json
+import sys
+
+directive = json.load(open(sys.argv[1], encoding="utf-8"))
+if directive.get("kind") != "run-stage" or directive.get("stage") != "flow-slice-review":
+    raise SystemExit(f"unexpected flow-slice-review directive: {directive!r}")
+PY
+
+  review_dir="$intent_root/construction/flow-slice-review"
+  mkdir -p "$review_dir"
+  {
+    printf '# Slice Review\n\n'
+    printf '## Spec Compliance\n\nAC-1 maps to src/slice.js and the passing boundary test.\n\n'
+    printf '## Findings\n\nNo Critical or Important findings.\n\n'
+    printf '## Verdict\n\nPASS\n'
+  } >"$review_dir/flow-slice-review.md"
+
+  approve_stage flow-slice-review
+
+  readiness_directive="$tmp/$harness-flow-merge-readiness-directive.json"
+  engine orchestrate next --scope flow-slice >"$readiness_directive"
+  finish_steering "$readiness_directive"
+  python3 - "$readiness_directive" <<'PY' || exit 1
+import json
+import sys
+
+directive = json.load(open(sys.argv[1], encoding="utf-8"))
+if directive.get("kind") != "run-stage" or directive.get("stage") != "flow-merge-readiness":
+    raise SystemExit(f"unexpected flow-merge-readiness directive: {directive!r}")
+PY
+
+  engine status > "$tmp/$harness-status.txt"
+  python3 - "$intent_root/aidlc-state.md" "$intent_root/audit" "$tmp/$harness-status.txt" <<'PY' || exit 1
+import glob
+import os
+import re
+import sys
+
+state_path, audit_dir, status_path = sys.argv[1:]
+state = open(state_path, encoding="utf-8").read()
+status = open(status_path, encoding="utf-8").read()
+current = dict(re.findall(r"^- \*\*(.+?)\*\*: *(.*)$", re.search(r"^## Current Status\n(.*?)(?=^## |\Z)", state, re.M | re.S).group(1), re.M))
+if current.get("Current Stage") != "flow-merge-readiness" or current.get("Lifecycle Phase") != "CONSTRUCTION":
+    raise SystemExit(f"state did not advance to flow-merge-readiness: {current!r}")
+status_fields = dict(re.findall(r"^([A-Za-z ]+):\s+(.*?)\s*$", status, re.M))
+if not (status_fields.get("Current Stage") or "").startswith("Merge Readiness ("):
+    raise SystemExit(f"status did not expose flow-merge-readiness: {status_fields!r}")
+events = []
+for path in glob.glob(os.path.join(audit_dir, "*.md")):
+    for block in re.split(r"\n---\n", open(path, encoding="utf-8").read()):
+        fields = dict(re.findall(r"^\*\*(.+?)\*\*: *(.*)$", block, re.M))
+        if "Event" in fields:
+            events.append(fields)
+needed = {
+    "STAGE_AWAITING_APPROVAL",
+    "GATE_APPROVED",
+    "STAGE_COMPLETED",
+}
+seen = {event.get("Event") for event in events if event.get("Stage") == "flow-slice-contract"}
+if not needed <= seen:
+    raise SystemExit(f"contract approval lifecycle is incomplete: {sorted(seen)!r}")
+for stage in ("code-generation", "build-and-test", "flow-slice-review"):
+    stage_events = {event.get("Event") for event in events if event.get("Stage") == stage}
+    if not needed <= stage_events:
+        raise SystemExit(f"{stage} lifecycle is incomplete: {sorted(stage_events)!r}")
+if not any(event.get("Event") == "STAGE_STARTED" and event.get("Stage") == "flow-merge-readiness" for event in events):
+    raise SystemExit("audit does not start flow-merge-readiness")
+
+progress = re.search(r"^## Stage Progress\n(.*?)(?=^## |\Z)", state, re.M | re.S).group(1)
+rows = dict((stage, checkbox) for checkbox, stage in re.findall(r"^- \[([ x?RS-])\] ([a-z0-9-]+) — EXECUTE$", progress, re.M))
+for stage in ("flow-slice-contract", "code-generation", "build-and-test", "flow-slice-review"):
+    if rows.get(stage) != "x":
+        raise SystemExit(f"stage is not completed in official state: {stage}={rows.get(stage)!r}")
+if rows.get("flow-merge-readiness") != "-":
+    raise SystemExit(f"merge readiness is not active in official state: {rows.get('flow-merge-readiness')!r}")
+PY
 
   case "$harness" in
     codex) [ -f "$project/.agents/skills/flow-slice/SKILL.md" ] || \

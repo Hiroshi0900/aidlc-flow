@@ -32,7 +32,7 @@ import sys
 
 expected = {
     "name": "flow",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "description": "Deliver one vertical slice through test, review, and merge readiness.",
     "author": {"name": "aidlc-flow"},
     "dependencies": ["core"],
@@ -102,6 +102,44 @@ done
 contract_frontmatter=$(plugin_frontmatter "$PLUGIN_ROOT/stages/inception/flow-slice-contract.md")
 assert_eq "$(plugin_yaml_scalar "$contract_frontmatter" outputs)" 'flow-requirements.md and flow-slice-contract.md under the engine-resolved record directory' "contract output names"
 
+python3 - "$PLUGIN_ROOT/contributions/construction/code-generation.md" <<'PY' || \
+  fail "code-generation contribution must connect approved contract artifacts and prose"
+import re
+import sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+match = re.match(r"^---\n(.*?)\n---\n(.*)$", text, re.S)
+if not match:
+    raise SystemExit("contribution frontmatter is missing")
+frontmatter, body = match.groups()
+adds = re.search(r"^adds:\n(.*?)(?=^[a-z_]+:|\Z)", frontmatter, re.M | re.S)
+if not adds:
+    raise SystemExit("adds block is missing")
+consumes = re.findall(
+    r"^    - artifact: ([a-z0-9-]+)\n      required: (true|false)$",
+    adds.group(1),
+    re.M,
+)
+if consumes != [("flow-requirements", "true"), ("flow-slice-contract", "true")]:
+    raise SystemExit(f"unexpected required consumes: {consumes!r}")
+fragments = re.findall(
+    r"^  - anchor: (\S+)\n    order: (\d+)$", frontmatter, re.M
+)
+if fragments != [("after-step:1", "100")]:
+    raise SystemExit(f"unexpected fragments: {fragments!r}")
+for required in (
+    "## fragment: after-step:1",
+    "flow-requirements.md",
+    "flow-slice-contract.md",
+    "Acceptance Criteria",
+    "Boundary Test",
+    "Merge Safety",
+    "TDD",
+):
+    if required not in body:
+        raise SystemExit(f"contribution body is missing {required!r}")
+PY
+
 slice_review_frontmatter=$(plugin_frontmatter "$PLUGIN_ROOT/stages/construction/flow-slice-review.md")
 assert_eq "$(plugin_yaml_scalar "$slice_review_frontmatter" lead_agent)" aidlc-architecture-reviewer-agent "slice review lead agent"
 assert_eq "$(plugin_yaml_object_list_field "$slice_review_frontmatter" consumes artifact)" 'flow-slice-contract
@@ -116,5 +154,13 @@ assert_eq "$(plugin_yaml_object_list_field "$merge_readiness_frontmatter" consum
 build-test-results' "merge readiness consumed artifacts"
 assert_eq "$(plugin_yaml_list "$merge_readiness_frontmatter" requires_stage)" flow-slice-review "merge readiness requires plugin stage"
 assert_eq "$(plugin_yaml_scalar "$merge_readiness_frontmatter" outputs)" 'flow-merge-readiness.md under the engine-resolved record directory' "merge readiness output name"
+
+readme=$(cat "$REPO_ROOT/README.md")
+assert_contains "$readme" '`flow-requirements`と`flow-slice-contract`をrequired input' \
+  "README documents the contract artifact handoff"
+assert_contains "$readme" '`requirements`と`unit-of-work`はexpected fallback' \
+  "README documents the two exact core fallbacks"
+assert_contains "$readme" 'code-generation → build-and-test → flow-slice-review → flow-merge-readiness' \
+  "README documents the verified delivery-stage transition range"
 
 printf 'PASS: plugin-source-test\n'

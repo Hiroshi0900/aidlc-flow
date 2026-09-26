@@ -43,7 +43,7 @@ expected_projection = {
 }
 if projection != expected_projection:
     raise SystemExit(f"unexpected projection metadata: {projection!r}")
-if manifest.get("name") != "aidlc-flow" or manifest.get("version") != "0.1.0":
+if manifest.get("name") != "aidlc-flow" or manifest.get("version") != "0.1.1":
     raise SystemExit(f"unexpected host manifest: {manifest!r}")
 PY
     fail "$harness projection manifests match the official build contract"
@@ -75,6 +75,41 @@ PY
       "$projection/contributions/$overlay" ||
       fail "$harness projection contains overlay: $overlay"
   done
+
+  python3 - "$projection/contributions/construction/code-generation.md" "$harness" <<'PY' ||
+import re
+import sys
+
+path, harness = sys.argv[1:]
+text = open(path, encoding="utf-8").read()
+match = re.match(r"^---\n(.*?)\n---\n(.*)$", text, re.S)
+if not match:
+    raise SystemExit(f"{harness} contribution frontmatter is missing")
+frontmatter, body = match.groups()
+consumes = re.findall(
+    r"^    - artifact: ([a-z0-9-]+)\n      required: (true|false)$",
+    frontmatter,
+    re.M,
+)
+if consumes != [("flow-requirements", "true"), ("flow-slice-contract", "true")]:
+    raise SystemExit(f"{harness} projection lost required consumes: {consumes!r}")
+fragments = re.findall(
+    r"^  - anchor: (\S+)\n    order: (\d+)$", frontmatter, re.M
+)
+if fragments != [("after-step:1", "100")]:
+    raise SystemExit(f"{harness} projection lost fragment metadata: {fragments!r}")
+for required in (
+    "flow-requirements.md",
+    "flow-slice-contract.md",
+    "Acceptance Criteria",
+    "Boundary Test",
+    "Merge Safety",
+    "TDD",
+):
+    if required not in body:
+        raise SystemExit(f"{harness} projection lost contribution prose: {required!r}")
+PY
+    fail "$harness projection preserves code-generation artifact continuity"
 done
 
 unsafe_data_home="$tmp/unsafe-data-home"

@@ -32,6 +32,30 @@ Codexではhook trustを承認してから`$flow-slice <slice description>`、Cl
 
 Claude Code向け初期化は、公式AI-DLCが生成するAmazon Bedrock用の環境変数を除去し、既存のClaudeサブスクリプションまたはログイン済みfirst-party認証を維持します。
 
+## Artifact handoff and lifecycle verification
+
+`flow-slice-contract`は承認済みのAcceptance Criteria、Boundary Test、Merge
+Safetyを`flow-requirements.md`と`flow-slice-contract.md`へ同内容で保存します。
+合成後のcore Code Generationは`flow-requirements`と`flow-slice-contract`をrequired inputとして受け取り、両方を他の設計入力より優先します。計画はAcceptance
+Criteriaを実装とテストへ対応付け、Boundary Testを最初のTDD Redとし、Merge
+Safetyのfeature-flag判断に拘束されます。
+
+このscopeは横断的なUnitを作らないzero-Unit workflowです。core
+`requirements`と`unit-of-work`はexpected fallbackであり、directiveの
+`consumes_absent`へ`expected: true`として現れます。公式plugin APIにはcore
+consumeのremove/replaceがないため、この2件だけはgraph validationの既知の
+off-path advisoryとして厳密に検証します。plugin契約の2 artifactは実在pathとして
+`consumes`へ入り、fallbackにはなりません。
+
+隔離integration testはCodexとClaudeの両方で、公式validator/build/composeと
+engineを使います。契約artifactを作成し、公式reportとUserPromptSubmit hookを
+通じて承認した後、`code-generation → build-and-test → flow-slice-review → flow-merge-readiness`
+の順に遷移させます。各stageのrequired outputs、workspace source、support-agent
+contribution、human-presence gateを無効化せず満たし、最終的にMerge Readinessが
+activeであることをstate、audit、statusから直接検証します。これは隔離fixtureによる
+engine contractの検証であり、実プロジェクトのLLM実装、push、PR作成、merge、deployを
+実行するものではありません。
+
 ## Safety
 
 - 既存の未コミット変更は削除、stash、commitしません。

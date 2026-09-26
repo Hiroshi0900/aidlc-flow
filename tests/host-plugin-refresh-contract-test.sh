@@ -107,7 +107,7 @@ PY
   host_list "$harness" > "$tmp/$harness-before.json"
   project_before=$(project_digest)
   case "$harness" in
-    codex) initial_cache="$CODEX_HOME/plugins/cache/aidlc-plugins/aidlc-flow/0.1.0" ;;
+    codex) initial_cache="$CODEX_HOME/plugins/cache/aidlc-plugins/aidlc-flow/0.1.1" ;;
     claude)
       initial_cache=$(python3 - "$tmp/$harness-before.json" "$project" <<'PY'
 import json, os, sys
@@ -144,7 +144,7 @@ PY
   assert_eq "$(project_digest)" "$project_before" "$harness same-version refusal preserves project config"
   assert_eq "$(tree_digest "$initial_cache")" "$cache_before" "$harness same-version refusal preserves the installed cache"
 
-  perl -pi -e 's/0\.1\.0/0.1.1/g' "$projection/.$harness-plugin/plugin.json" "$projection/.$harness-plugin/marketplace.json"
+  perl -pi -e 's/0\.1\.1/0.1.2/g' "$projection/.$harness-plugin/plugin.json" "$projection/.$harness-plugin/marketplace.json"
   marker="version-contract-$harness"
   printf '\n%s\n' "$marker" >> "$projection/scopes/flow-slice.md"
   : > "$REAL_HOST_LOG"
@@ -157,13 +157,13 @@ harness, codex_home, project = sys.argv[2:]
 if harness == "codex":
     entries = value.get("installed", [])
     matches = [entry for entry in entries if entry.get("pluginId") == "aidlc-flow@aidlc-plugins"]
-    if len(matches) != 1 or matches[0].get("version") != "0.1.1":
-        raise SystemExit("Codex inventory did not update to 0.1.1")
-    print(os.path.join(codex_home, "plugins", "cache", "aidlc-plugins", "aidlc-flow", "0.1.1"))
+    if len(matches) != 1 or matches[0].get("version") != "0.1.2":
+        raise SystemExit("Codex inventory did not update to 0.1.2")
+    print(os.path.join(codex_home, "plugins", "cache", "aidlc-plugins", "aidlc-flow", "0.1.2"))
 else:
     matches = [entry for entry in value if entry.get("id") == "aidlc-flow@aidlc-plugins" and entry.get("scope") == "project" and os.path.realpath(entry.get("projectPath", "")) == os.path.realpath(project)]
-    if len(matches) != 1 or matches[0].get("version") != "0.1.1" or not isinstance(matches[0].get("installPath"), str):
-        raise SystemExit("Claude inventory did not update to 0.1.1")
+    if len(matches) != 1 or matches[0].get("version") != "0.1.2" or not isinstance(matches[0].get("installPath"), str):
+        raise SystemExit("Claude inventory did not update to 0.1.2")
     print(matches[0]["installPath"])
 PY
   )
