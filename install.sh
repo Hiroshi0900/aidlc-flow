@@ -49,7 +49,8 @@ validate_existing_destination() {
       printf 'aidlc-flow: existing install marker is invalid: %s\n' "$install_marker" >&2
       return 1
     fi
-  elif [ ! -f "$destination/bin/aidlc-flow" ] || [ -L "$destination/bin/aidlc-flow" ] ||
+  elif [ ! -d "$destination/bin" ] || [ -L "$destination/bin" ] ||
+    [ ! -f "$destination/bin/aidlc-flow" ] || [ -L "$destination/bin/aidlc-flow" ] ||
     [ ! -d "$destination/lib" ] || [ -L "$destination/lib" ] ||
     [ ! -d "$destination/memory" ] || [ -L "$destination/memory" ]; then
     printf 'aidlc-flow: existing install destination is not owned by aidlc-flow: %s\n' \
@@ -146,6 +147,8 @@ backup="$backup_root/aidlc-flow"
 if [ -d "$destination" ]; then
   cp -R "$destination/." "$staging/"
 fi
+# cp -R preserves optional legacy subtree symlinks. These removals target only
+# children of our private staging tree, so rm removes a link rather than its target.
 for directory in bin lib memory plugins plugin-dist; do
   rm -rf "$staging/$directory"
 done

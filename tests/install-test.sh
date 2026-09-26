@@ -338,6 +338,58 @@ assert_eq "$(cat "$legacy_root/share/aidlc-flow/.aidlc-flow-install")" \
   'schema=1
 owner=aidlc-flow' "legacy install is migrated to ownership marker"
 
+for linked_managed_directory in bin lib memory; do
+  linked_case_root="$tmp/legacy-linked-$linked_managed_directory"
+  linked_destination="$linked_case_root/share/aidlc-flow"
+  linked_external="$linked_case_root/external-$linked_managed_directory"
+  mkdir -p "$linked_destination" "$linked_external"
+  for managed_directory in bin lib memory; do
+    if [ "$managed_directory" != "$linked_managed_directory" ]; then
+      mkdir -p "$linked_destination/$managed_directory"
+    fi
+  done
+  if [ "$linked_managed_directory" = bin ]; then
+    cp "$root/bin/aidlc-flow" "$linked_external/aidlc-flow"
+  else
+    cp "$root/bin/aidlc-flow" "$linked_destination/bin/aidlc-flow"
+  fi
+  printf 'keep external %s\n' "$linked_managed_directory" \
+    >"$linked_external/sentinel"
+  ln -s "$linked_external" "$linked_destination/$linked_managed_directory"
+  linked_destination_before=$(find "$linked_destination" -type f -exec cksum {} \; | sort)
+  linked_external_before=$(find "$linked_external" -type f -exec cksum {} \; | sort)
+  linked_target_before=$(readlink "$linked_destination/$linked_managed_directory")
+  set +e
+  linked_output=$(AIDLC_FLOW_DATA_HOME="$linked_case_root/share" \
+    AIDLC_FLOW_BIN_HOME="$linked_case_root/bin-home" \
+    AIDLC_FLOW_BUN="$fake_bun" AIDLC_FLOW_AIDLC_HOME="$fake_aidlc_home" \
+    /bin/sh "$root/install.sh" 2>&1)
+  linked_status=$?
+  set -e
+  [ "$linked_status" -ne 0 ] ||
+    fail "linked legacy $linked_managed_directory exits non-zero"
+  assert_contains "$linked_output" "existing install destination is not owned by aidlc-flow" \
+    "linked legacy $linked_managed_directory reports a clear error"
+  linked_destination_after=$(find "$linked_destination" -type f -exec cksum {} \; | sort)
+  linked_external_after=$(find "$linked_external" -type f -exec cksum {} \; | sort)
+  assert_eq "$linked_destination_after" "$linked_destination_before" \
+    "linked legacy $linked_managed_directory preserves destination files"
+  assert_eq "$linked_external_after" "$linked_external_before" \
+    "linked legacy $linked_managed_directory preserves external files"
+  [ -L "$linked_destination/$linked_managed_directory" ] ||
+    fail "linked legacy $linked_managed_directory preserves managed symlink"
+  assert_eq "$(readlink "$linked_destination/$linked_managed_directory")" \
+    "$linked_target_before" "linked legacy $linked_managed_directory preserves symlink target"
+  [ ! -e "$linked_case_root/bin-home" ] ||
+    fail "linked legacy $linked_managed_directory leaves command path unchanged"
+  [ ! -e "$linked_case_root/share/.aidlc-flow-install.lock" ] ||
+    fail "linked legacy $linked_managed_directory leaves no lock"
+  linked_temporary_leaks=$(find "$linked_case_root/share" -maxdepth 1 -type d \
+    \( -name '.aidlc-flow.new.*' -o -name '.aidlc-flow.backup.*' \) -print)
+  [ -z "$linked_temporary_leaks" ] ||
+    fail "linked legacy $linked_managed_directory leaves no temporary directories"
+done
+
 invalid_marker_root="$tmp/invalid-marker"
 mkdir -p "$invalid_marker_root/share/aidlc-flow/bin" \
   "$invalid_marker_root/share/aidlc-flow/lib" "$invalid_marker_root/share/aidlc-flow/memory"
