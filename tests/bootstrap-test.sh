@@ -73,7 +73,7 @@ printf '%s|%s\n' "$PWD" "$*" >> "$AIDLC_FAKE_LOG"
 if [ "$*" = "engine plugin sync" ]; then
   exit "${AIDLC_FAKE_SYNC_STATUS:-0}"
 fi
-if [ "${1:-}" = config ] && [ "${2:-}" = project ]; then
+if [ "$*" = "engine plugin select aidlc flow" ]; then
   exit "${AIDLC_FAKE_SELECT_STATUS:-0}"
 fi
 fake_command=$1
@@ -127,7 +127,8 @@ mkdir -p "$decoy"
 output=$(AIDLC_PROJECT_DIR="$decoy" CLAUDE_PROJECT_DIR="$decoy" PATH="$fake_bin:$PATH" "$root/bin/aidlc-flow" init --harness codex --project-dir "$project_link")
 log=$(cat "$AIDLC_FAKE_LOG")
 expected_log="$project|config --project-dir $project --harness codex --mcp none --quiet
-$project|config project --project-dir $project --plugins flow --yes
+$project|engine plugin sync
+$project|engine plugin select aidlc flow
 $project|engine plugin sync
 $caller_dir|doctor --project-dir $project --quiet"
 assert_eq "$log" "$expected_log" "codex config and doctor are called in order"
@@ -136,7 +137,8 @@ codex|$project|plugin marketplace list --json
 codex|$project|plugin marketplace add $projection_root/codex
 codex|$project|plugin list --json
 codex|$project|plugin add aidlc-flow@aidlc-plugins
-aidlc|$project|config project --project-dir $project --plugins flow --yes
+aidlc|$project|engine plugin sync
+aidlc|$project|engine plugin select aidlc flow
 aidlc|$project|engine plugin sync
 aidlc|$caller_dir|doctor --project-dir $project --quiet" "bootstrap performs core config, host install, selection, sync, then doctor"
 [ ! -e "$decoy/aidlc" ] || fail "codex config ignores a conflicting environment project"
@@ -183,7 +185,8 @@ TMPDIR="$tmp" PATH="$fake_bin:$PATH" "$root/bin/aidlc-flow" init --harness codex
 after=$(cksum "$ignored_project/aidlc/spaces/default/memory/team.md" "$ignored_project/aidlc/spaces/default/memory/phases/construction.md")
 assert_eq "$after" "$before" "unchanged ignored managed memory is allowed and byte-identical"
 assert_eq "$(cat "$AIDLC_FAKE_LOG")" "$ignored_project|config --project-dir $ignored_project --harness codex --mcp none --quiet
-$ignored_project|config project --project-dir $ignored_project --plugins flow --yes
+$ignored_project|engine plugin sync
+$ignored_project|engine plugin select aidlc flow
 $ignored_project|engine plugin sync
 $caller_dir|doctor --project-dir $ignored_project --quiet" "unchanged ignored memory completes config then doctor"
 awk '
@@ -223,7 +226,8 @@ rm "$project/local-note.txt"
 output=$(AIDLC_PROJECT_DIR="$decoy" CLAUDE_PROJECT_DIR="$decoy" PATH="$fake_bin:$PATH" "$root/bin/aidlc-flow" init --harness claude --project-dir "$project")
 assert_eq "$(cat "$AIDLC_FAKE_LOG")" "$project|config --project-dir $project --harness claude --mcp none --quiet
 $project|config providers --project-dir $project --provider other --acknowledge --yes
-$project|config project --project-dir $project --plugins flow --yes
+$project|engine plugin sync
+$project|engine plugin select aidlc flow
 $project|engine plugin sync
 $caller_dir|doctor --project-dir $project --quiet" "claude config and doctor are called in order"
 assert_contains "$output" "aidlc-flow: configured claude for $project" "claude completion is printed"
@@ -295,7 +299,8 @@ set -e
 assert_eq "$status" "1" "managed path symlink created by config is rejected"
 assert_contains "$(cat "$tmp/symlink-post.err")" "symbolic link" "post-config symlink has a specific diagnostic"
 assert_eq "$(cat "$AIDLC_FAKE_LOG")" "$symlink_post_project|config --project-dir $symlink_post_project --harness codex --mcp none --quiet
-$symlink_post_project|config project --project-dir $symlink_post_project --plugins flow --yes
+$symlink_post_project|engine plugin sync
+$symlink_post_project|engine plugin select aidlc flow
 $symlink_post_project|engine plugin sync" "post-config symlink stops before doctor"
 [ ! -e "$symlink_post_outside/team.md" ] || fail "post-config symlink leaves repository-external team memory unchanged"
 [ ! -e "$symlink_post_outside/phases" ] || fail "post-config symlink leaves repository-external phase memory unchanged"
@@ -326,7 +331,8 @@ status=$?
 set -e
 assert_eq "$status" "25" "plugin selection failure status is propagated"
 assert_eq "$(cat "$AIDLC_FAKE_LOG")" "$select_fail_project|config --project-dir $select_fail_project --harness codex --mcp none --quiet
-$select_fail_project|config project --project-dir $select_fail_project --plugins flow --yes" "selection failure stops before sync and doctor"
+$select_fail_project|engine plugin sync
+$select_fail_project|engine plugin select aidlc flow" "selection failure stops before final sync and doctor"
 assert_not_contains "$output" "aidlc-flow: configured" "selection failure has no success output"
 
 sync_fail_project="$tmp/sync-fail-project"
@@ -340,7 +346,6 @@ status=$?
 set -e
 assert_eq "$status" "26" "plugin sync failure status is propagated"
 assert_eq "$(cat "$AIDLC_FAKE_LOG")" "$sync_fail_project|config --project-dir $sync_fail_project --harness codex --mcp none --quiet
-$sync_fail_project|config project --project-dir $sync_fail_project --plugins flow --yes
 $sync_fail_project|engine plugin sync" "sync failure stops before doctor"
 assert_not_contains "$output" "aidlc-flow: configured" "sync failure has no success output"
 
@@ -378,7 +383,8 @@ after=$(cksum "$merge_fail_project/aidlc/spaces/default/memory/team.md")
 assert_eq "$status" "1" "managed memory merge failure exits 1"
 assert_eq "$after" "$before" "managed memory merge failure preserves existing memory"
 assert_eq "$(cat "$AIDLC_FAKE_LOG")" "$merge_fail_project|config --project-dir $merge_fail_project --harness codex --mcp none --quiet
-$merge_fail_project|config project --project-dir $merge_fail_project --plugins flow --yes
+$merge_fail_project|engine plugin sync
+$merge_fail_project|engine plugin select aidlc flow
 $merge_fail_project|engine plugin sync" "managed memory merge failure stops before doctor"
 assert_contains "$(cat "$tmp/merge-fail.err")" "failed to update managed memory: $merge_fail_project/aidlc/spaces/default/memory/team.md" "merge failure has a general diagnostic"
 assert_not_contains "$output" "aidlc-flow: configured" "merge failure has no success output"
@@ -394,7 +400,8 @@ status=$?
 set -e
 assert_eq "$status" "24" "doctor failure status is propagated"
 assert_eq "$(cat "$AIDLC_FAKE_LOG")" "$doctor_fail_project|config --project-dir $doctor_fail_project --harness codex --mcp none --quiet
-$doctor_fail_project|config project --project-dir $doctor_fail_project --plugins flow --yes
+$doctor_fail_project|engine plugin sync
+$doctor_fail_project|engine plugin select aidlc flow
 $doctor_fail_project|engine plugin sync
 $caller_dir|doctor --project-dir $doctor_fail_project --quiet" "doctor failure occurs after config and memory merge"
 assert_contains "$(cat "$doctor_fail_project/aidlc/spaces/default/memory/team.md")" "commit SHA" "memory is merged before doctor"
@@ -408,7 +415,8 @@ git -C "$alternate_project" init -q
 output=$(AIDLC_FAKE_SPACE=alternate PATH="$fake_bin:$PATH" "$root/bin/aidlc-flow" init --harness claude --project-dir "$alternate_project")
 assert_eq "$(cat "$AIDLC_FAKE_LOG")" "$alternate_project|config --project-dir $alternate_project --harness claude --mcp none --quiet
 $alternate_project|config providers --project-dir $alternate_project --provider other --acknowledge --yes
-$alternate_project|config project --project-dir $alternate_project --plugins flow --yes
+$alternate_project|engine plugin sync
+$alternate_project|engine plugin select aidlc flow
 $alternate_project|engine plugin sync
 $caller_dir|doctor --project-dir $alternate_project --quiet" "alternate active space preserves config then doctor order"
 assert_contains "$(cat "$alternate_project/aidlc/spaces/alternate/memory/team.md")" "commit SHA" "team memory is merged into the configured active space"

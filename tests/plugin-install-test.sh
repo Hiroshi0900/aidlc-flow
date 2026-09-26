@@ -97,7 +97,7 @@ cat > "$fake_bin/aidlc" <<'SH'
 #!/bin/sh
 printf 'aidlc|%s|%s|harness=%s/%s\n' "$PWD" "$*" "${AIDLC_HARNESS_DIR:-}" "${AIDLC_HARNESS_NAME:-}" >> "$HOST_FAKE_LOG"
 case "$*" in
-  'config project --project-dir '*" --plugins flow --yes") exit "${AIDLC_FAKE_SELECT_STATUS:-0}" ;;
+  'engine plugin select aidlc flow') exit "${AIDLC_FAKE_SELECT_STATUS:-0}" ;;
   'engine plugin sync') exit "${AIDLC_FAKE_SYNC_STATUS:-0}" ;;
   *) exit 93 ;;
 esac
@@ -138,7 +138,8 @@ assert_eq "$(cat "$HOST_FAKE_LOG")" "codex|$project|plugin marketplace list --js
 codex|$project|plugin marketplace add $projection_root/codex
 codex|$project|plugin list --json
 codex|$project|plugin add aidlc-flow@aidlc-plugins
-aidlc|$project|config project --project-dir $project --plugins flow --yes|harness=/
+aidlc|$project|engine plugin sync|harness=.codex/codex
+aidlc|$project|engine plugin select aidlc flow|harness=.codex/codex
 aidlc|$project|engine plugin sync|harness=.codex/codex" "Codex host install precedes project selection and sync"
 
 : > "$HOST_FAKE_LOG"
@@ -148,7 +149,8 @@ export CODEX_MARKETPLACES_JSON CODEX_PLUGINS_JSON
 install_flow_plugin "$project" codex "$projection_root/codex"
 assert_eq "$(cat "$HOST_FAKE_LOG")" "codex|$project|plugin marketplace list --json
 codex|$project|plugin list --json
-aidlc|$project|config project --project-dir $project --plugins flow --yes|harness=/
+aidlc|$project|engine plugin sync|harness=.codex/codex
+aidlc|$project|engine plugin select aidlc flow|harness=.codex/codex
 aidlc|$project|engine plugin sync|harness=.codex/codex" "same Codex source is host-idempotent"
 unset CODEX_PLUGINS_JSON
 
@@ -211,7 +213,8 @@ assert_eq "$(cat "$HOST_FAKE_LOG")" "claude|$project|plugin marketplace list --j
 claude|$project|plugin marketplace add --scope project $projection_root/claude
 claude|$project|plugin list --json
 claude|$project|plugin install --scope project --yes aidlc-flow@aidlc-plugins
-aidlc|$project|config project --project-dir $project --plugins flow --yes|harness=/
+aidlc|$project|engine plugin sync|harness=.claude/claude
+aidlc|$project|engine plugin select aidlc flow|harness=.claude/claude
 aidlc|$project|engine plugin sync|harness=.claude/claude" "Claude project-local install precedes project selection and sync"
 
 : > "$HOST_FAKE_LOG"
@@ -221,7 +224,8 @@ export CLAUDE_MARKETPLACES_JSON CLAUDE_PLUGINS_JSON
 install_flow_plugin "$project" claude "$projection_root/claude"
 assert_eq "$(cat "$HOST_FAKE_LOG")" "claude|$project|plugin marketplace list --json
 claude|$project|plugin list --json
-aidlc|$project|config project --project-dir $project --plugins flow --yes|harness=/
+aidlc|$project|engine plugin sync|harness=.claude/claude
+aidlc|$project|engine plugin select aidlc flow|harness=.claude/claude
 aidlc|$project|engine plugin sync|harness=.claude/claude" "same Claude source is host-idempotent"
 unset CLAUDE_MARKETPLACES_JSON CLAUDE_PLUGINS_JSON
 
@@ -290,7 +294,8 @@ claude|$project|plugin update --scope project --yes aidlc-flow@aidlc-plugins
 claude|$project|plugin list --json
 claude|$project|plugin enable --scope project aidlc-flow@aidlc-plugins
 claude|$project|plugin list --json
-aidlc|$project|config project --project-dir $project --plugins flow --yes|harness=/
+aidlc|$project|engine plugin sync|harness=.claude/claude
+aidlc|$project|engine plugin select aidlc flow|harness=.claude/claude
 aidlc|$project|engine plugin sync|harness=.claude/claude" "disabled Claude version update is verified before enable and sync"
 assert_contains "$(cat "$HOST_FAKE_LOG")" "plugin update --scope project --yes aidlc-flow@aidlc-plugins" "new Claude version uses the supported project update path"
 assert_contains "$(cat "$HOST_FAKE_LOG")" "plugin enable --scope project aidlc-flow@aidlc-plugins" "disabled Claude version is enabled after update"
@@ -342,7 +347,7 @@ for failure in host select sync; do
       ;;
     select)
       assert_eq "$failure_status" 32 "selection failure propagates"
-      case "$(cat "$HOST_FAKE_LOG")" in *'engine plugin sync'*) fail "selection failure must stop before sync" ;; esac
+      case "$(cat "$HOST_FAKE_LOG")" in *'engine plugin select aidlc flow'*'engine plugin sync'*) fail "selection failure must stop before final sync" ;; esac
       unset AIDLC_FAKE_SELECT_STATUS
       ;;
     sync)

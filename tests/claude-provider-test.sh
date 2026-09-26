@@ -36,7 +36,7 @@ fi
 if [ "$*" = 'engine plugin sync' ]; then
   exit 0
 fi
-if [ "${1:-}" = config ] && [ "${2:-}" = project ]; then
+if [ "$*" = 'engine plugin select aidlc flow' ]; then
   exit 0
 fi
 command_name=$1

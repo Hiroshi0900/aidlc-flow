@@ -488,7 +488,15 @@ PY
       ;;
   esac
 
-  aidlc config project --project-dir "$aidlc_flow_project" --plugins flow --yes
+  # A newly installed host plugin is discoverable by the plugin engine but is
+  # not part of the project graph until the first sync.  Compose it once, keep
+  # the official core plugin selected with flow, then sync the persisted
+  # selection.  Selecting only flow disables core producers and makes the
+  # flow-slice artifact closure invalid.
+  AIDLC_HARNESS_DIR=".$aidlc_flow_harness" AIDLC_HARNESS_NAME="$aidlc_flow_harness" \
+    aidlc engine plugin sync
+  AIDLC_HARNESS_DIR=".$aidlc_flow_harness" AIDLC_HARNESS_NAME="$aidlc_flow_harness" \
+    aidlc engine plugin select aidlc flow
   AIDLC_HARNESS_DIR=".$aidlc_flow_harness" AIDLC_HARNESS_NAME="$aidlc_flow_harness" \
     aidlc engine plugin sync
 )
