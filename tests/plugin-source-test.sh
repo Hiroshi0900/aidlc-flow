@@ -5,7 +5,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$SCRIPT_DIR/testlib.sh"
 
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
-PLUGIN_ROOT="$REPO_ROOT/plugins/flow"
+PLUGIN_ROOT=${PLUGIN_ROOT_OVERRIDE:-"$REPO_ROOT/plugins/flow"}
 OLD_PLUGIN_ROOT="$REPO_ROOT/plugins/aidlc-flow-slice"
 
 [ ! -e "$OLD_PLUGIN_ROOT" ] || fail "legacy plugin root must not exist: plugins/aidlc-flow-slice"
@@ -28,6 +28,8 @@ done
 manifest=$(cat "$PLUGIN_ROOT/.aidlc-plugin/plugin.json")
 assert_contains "$manifest" '"name": "flow"' "manifest name matches root"
 assert_contains "$manifest" '"version": "0.1.0"' "manifest version"
+assert_contains "$manifest" '"description": "Deliver one vertical slice through test, review, and merge readiness."' "manifest description"
+assert_contains "$manifest" '"author": { "name": "aidlc-flow" }' "manifest author"
 assert_contains "$manifest" '"dependencies": ["core"]' "manifest core dependency"
 assert_contains "$manifest" '"stages": "stages/"' "manifest stage path"
 assert_contains "$manifest" '"scopes": "scopes/"' "manifest scope path"
@@ -39,13 +41,28 @@ esac
 scope=$(cat "$PLUGIN_ROOT/scopes/flow-slice.md")
 assert_contains "$scope" 'name: flow-slice' "scope uses plugin prefix"
 assert_contains "$scope" 'plugin: flow' "scope owner"
+assert_contains "$scope" 'depth: Minimal' "scope"
 assert_contains "$scope" 'testStrategy: Standard' "scope"
+assert_contains "$scope" 'runner: true' "scope"
 assert_contains "$scope" 'review_cap: none' "scope"
 assert_contains "$scope" 'change_control: relaxed' "scope"
+assert_contains "$scope" 'sensors: on' "scope"
 assert_contains "$scope" 'learnings: off' "scope"
 assert_contains "$scope" 'summary_confirmation: off' "scope"
 grep -q '^name: flow-slice$' "$PLUGIN_ROOT/scopes/flow-slice.md" || fail "scope name must equal filename stem"
 grep -q '^plugin: flow$' "$PLUGIN_ROOT/scopes/flow-slice.md" || fail "scope owner must equal manifest name"
+for policy in \
+  'depth: Minimal' \
+  'testStrategy: Standard' \
+  'runner: true' \
+  'review_cap: none' \
+  'change_control: relaxed' \
+  'sensors: on' \
+  'learnings: off' \
+  'summary_confirmation: off'
+do
+  grep -q "^$policy$" "$PLUGIN_ROOT/scopes/flow-slice.md" || fail "scope policy must be exact: $policy"
+done
 
 assert_stage() {
   relative_path=$1
