@@ -902,58 +902,106 @@ for path in sorted(glob.glob(os.path.join(audit_dir, "*.md"))):
         if "Event" in fields:
             events.append(fields)
 
-lifecycle = (
+# Phase boundaries and deterministic workspace evidence are legitimate audit
+# rows between stages, but they are not lifecycle transitions. Filter only by
+# event type (never by an expected stage allowlist), so any extra lifecycle row
+# for any stage, workflow, or human turn remains visible to the exact sequence.
+sequence_event_names = {
+    "WORKFLOW_STARTED",
     "STAGE_STARTED",
     "STAGE_AWAITING_APPROVAL",
+    "HUMAN_TURN",
     "GATE_APPROVED",
     "STAGE_COMPLETED",
-)
-completed_stages = (
-    "flow-slice-contract",
-    "code-generation",
-    "build-and-test",
-    "flow-slice-review",
-)
-for stage in completed_stages:
-    indices = {}
-    for event_name in lifecycle:
-        matches = [
-            index for index, event in enumerate(events)
-            if event.get("Event") == event_name and event.get("Stage") == stage
-        ]
-        if len(matches) != 1:
-            raise SystemExit(f"audit event {event_name} for {stage} occurs {len(matches)} times")
-        indices[event_name] = matches[0]
-    humans = [
-        index for index, event in enumerate(events)
-        if event.get("Event") == "HUMAN_TURN"
-        and event.get("Session") == f"integration-{harness}"
-        and indices["STAGE_AWAITING_APPROVAL"] < index < indices["GATE_APPROVED"]
-    ]
-    if len(humans) != 1:
-        raise SystemExit(f"audit HUMAN_TURN for {stage} occurs {len(humans)} times")
-    actual_order = [
-        indices["STAGE_STARTED"],
-        indices["STAGE_AWAITING_APPROVAL"],
-        humans[0],
-        indices["GATE_APPROVED"],
-        indices["STAGE_COMPLETED"],
-    ]
-    if actual_order != sorted(actual_order) or len(set(actual_order)) != 5:
-        raise SystemExit(f"audit lifecycle is out of order for {stage}: {actual_order!r}")
+}
+sequence_fields = ("Event", "Stage", "Scope", "Session", "User Input", "Agent")
 
-all_humans = [
-    event for event in events
-    if event.get("Event") == "HUMAN_TURN" and event.get("Session") == f"integration-{harness}"
+def projected_audit_sequence(candidate):
+    return [
+        tuple(event.get(field) for field in sequence_fields)
+        for event in candidate
+        if event.get("Event") in sequence_event_names
+    ]
+
+expected_audit_sequence = [
+    ("WORKFLOW_STARTED", None, "flow-slice", None, None, None),
+    ("STAGE_STARTED", "workspace-scaffold", None, None, None, "orchestrator"),
+    ("STAGE_COMPLETED", "workspace-scaffold", None, None, None, None),
+    ("STAGE_STARTED", "workspace-detection", None, None, None, "orchestrator"),
+    ("STAGE_COMPLETED", "workspace-detection", None, None, None, None),
+    ("STAGE_STARTED", "state-init", None, None, None, "orchestrator"),
+    ("STAGE_COMPLETED", "state-init", None, None, None, None),
 ]
-if len(all_humans) != len(completed_stages):
-    raise SystemExit(f"audit contains unexpected HUMAN_TURN rows: {len(all_humans)}")
-readiness_lifecycle = [
-    event.get("Event") for event in events
-    if event.get("Stage") == "flow-merge-readiness" and event.get("Event") in lifecycle
-]
-if readiness_lifecycle != ["STAGE_STARTED"]:
-    raise SystemExit(f"merge readiness audit is not exactly active: {readiness_lifecycle!r}")
+for stage, agent in (
+    ("flow-slice-contract", "aidlc-product-agent"),
+    ("code-generation", "aidlc-developer-agent"),
+    ("build-and-test", "aidlc-quality-agent"),
+    ("flow-slice-review", "aidlc-architecture-reviewer-agent"),
+):
+    expected_audit_sequence.extend([
+        ("STAGE_STARTED", stage, None, None, None, agent),
+        ("STAGE_AWAITING_APPROVAL", stage, None, None, None, None),
+        ("HUMAN_TURN", None, None, f"integration-{harness}", None, None),
+        ("GATE_APPROVED", stage, None, None, "Approve", None),
+        ("STAGE_COMPLETED", stage, None, None, None, None),
+    ])
+expected_audit_sequence.append(
+    ("STAGE_STARTED", "flow-merge-readiness", None, None, None, "aidlc-delivery-agent")
+)
+
+def audit_sequence_error(candidate):
+    actual = projected_audit_sequence(candidate)
+    if actual == expected_audit_sequence:
+        return None
+    mismatch = next(
+        (
+            index,
+            actual[index] if index < len(actual) else "<missing>",
+            expected_audit_sequence[index] if index < len(expected_audit_sequence) else "<extra>",
+        )
+        for index in range(max(len(actual), len(expected_audit_sequence)))
+        if index >= len(actual)
+        or index >= len(expected_audit_sequence)
+        or actual[index] != expected_audit_sequence[index]
+    )
+    return (
+        f"first mismatch at {mismatch[0]}: actual={mismatch[1]!r}, "
+        f"expected={mismatch[2]!r}; lengths={len(actual)}/{len(expected_audit_sequence)}"
+    )
+
+sequence_error = audit_sequence_error(events)
+if sequence_error is not None:
+    raise SystemExit(f"audit lifecycle sequence differs from canonical flow-slice: {sequence_error}")
+
+# Mutation controls prove the exact comparator rejects the two false positives
+# that set-based and per-stage-only validation previously admitted.
+duplicate_completion = list(events)
+duplicate_index = next(
+    index for index, event in enumerate(duplicate_completion)
+    if event.get("Event") == "STAGE_COMPLETED"
+    and event.get("Stage") == "workspace-scaffold"
+)
+duplicate_completion.insert(
+    duplicate_index + 1, dict(duplicate_completion[duplicate_index])
+)
+if audit_sequence_error(duplicate_completion) is None:
+    raise SystemExit("audit verifier accepts duplicate initialization completion")
+
+interleaved_stages = list(events)
+code_start_index = next(
+    index for index, event in enumerate(interleaved_stages)
+    if event.get("Event") == "STAGE_STARTED"
+    and event.get("Stage") == "code-generation"
+)
+code_start = interleaved_stages.pop(code_start_index)
+contract_gate_index = next(
+    index for index, event in enumerate(interleaved_stages)
+    if event.get("Event") == "STAGE_AWAITING_APPROVAL"
+    and event.get("Stage") == "flow-slice-contract"
+)
+interleaved_stages.insert(contract_gate_index, code_start)
+if audit_sequence_error(interleaved_stages) is None:
+    raise SystemExit("audit verifier accepts interleaved gated stages")
 PY
 
   case "$harness" in
