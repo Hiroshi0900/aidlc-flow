@@ -33,9 +33,9 @@
 <li>AI-DLCを使わない比較実験そのもの。このワークフローは、比較対象となるAI-DLC側の測定可能な実行形を提供する。</li>
 </ul>
 <h2>採用する構成</h2>
-<p><code>aidlc-flow</code> にプロジェクトローカルの再利用可能プラグイン <code>aidlc-flow-slice</code> を同梱する。公式AI-DLCの生成物を直接書き換えず、公式のプラグインとカスタムスコープの仕組みを利用する。</p>
+<p><code>aidlc-flow</code> にプロジェクトローカルの再利用可能プラグイン <code>flow</code> を同梱する。公式AI-DLCの生成物を直接書き換えず、公式のプラグインとカスタムスコープの仕組みを利用する。公式仕様では <code>aidlc-*</code> が予約済みなので、プラグイン所有のscope名は <code>flow-slice</code> とする。</p>
 <pre><code class="language-text">aidlc-flow
-├── plugins/aidlc-flow-slice/
+├── plugins/flow/
 │   ├── manifest
 │   ├── slice scope
 │   ├── slice-contract stage
@@ -126,13 +126,14 @@ PR経由でmainへマージ</code></pre>
 <ol>
 <li>インストール済みAI-DLCが対応バージョンか確認する。</li>
 <li>既存の公式AI-DLC設定を行う。</li>
-<li>同梱した <code>aidlc-flow-slice</code> をインストールまたは更新する。</li>
-<li>coreの <code>aidlc</code> と <code>aidlc-flow-slice</code> の両方を有効化する。</li>
+<li>同梱した <code>flow</code> pluginをインストールまたは更新する。</li>
+<li>coreの <code>aidlc</code> と <code>flow</code> の両方を有効化する。</li>
 <li>plugin buildでグラフとscopeを検証する。</li>
 <li>既存の共有Memoryをマーカー範囲内で更新する。</li>
 <li><code>aidlc doctor</code> で最終検査する。</li>
 </ol>
-<p>Claude Codeでは <code>/aidlc-flow-slice &lt;説明&gt;</code>、Codexでは同等の <code>$aidlc-flow-slice &lt;説明&gt;</code> を入口とする。実際の生成コマンド名はv2.9.0のplugin projectionで確認し、両harnessの利用者向け表記をREADMEに記載する。</p>
+<p>Claude Codeでは <code>/flow-slice &lt;説明&gt;</code>、Codexでは同等の <code>$flow-slice &lt;説明&gt;</code> を入口とする。これはAI-DLC v2.9.0の公式plugin projectionが生成するrunnerであり、独立した疑似ワークフローではない。</p>
+<p>最初の導入単位はこのPCでのローカル利用とする。公式validator/build、両harnessへの導入、scope解決、stage graph、doctor、実intent開始までを確認してから、他PC向けの配布方法を別途整える。</p>
 <h2>更新時の安全性</h2>
 <ul>
 <li>workflow進行中はプラグイン更新を拒否する。</li>

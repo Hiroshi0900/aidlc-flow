@@ -29,11 +29,11 @@
 
 ## 採用する構成
 
-`aidlc-flow` にプロジェクトローカルの再利用可能プラグイン `aidlc-flow-slice` を同梱する。公式AI-DLCの生成物を直接書き換えず、公式のプラグインとカスタムスコープの仕組みを利用する。
+`aidlc-flow` にプロジェクトローカルの再利用可能プラグイン `flow` を同梱する。公式AI-DLCの生成物を直接書き換えず、公式のプラグインとカスタムスコープの仕組みを利用する。公式仕様では `aidlc-*` が予約済みなので、プラグイン所有のscope名は `flow-slice` とする。
 
 ```text
 aidlc-flow
-├── plugins/aidlc-flow-slice/
+├── plugins/flow/
 │   ├── manifest
 │   ├── slice scope
 │   ├── slice-contract stage
@@ -151,13 +151,15 @@ push、PR作成、mainへのマージは別々の外部操作であり、それ�
 
 1. インストール済みAI-DLCが対応バージョンか確認する。
 2. 既存の公式AI-DLC設定を行う。
-3. 同梱した `aidlc-flow-slice` をインストールまたは更新する。
-4. coreの `aidlc` と `aidlc-flow-slice` の両方を有効化する。
+3. 同梱した `flow` pluginをインストールまたは更新する。
+4. coreの `aidlc` と `flow` の両方を有効化する。
 5. plugin buildでグラフとscopeを検証する。
 6. 既存の共有Memoryをマーカー範囲内で更新する。
 7. `aidlc doctor` で最終検査する。
 
-Claude Codeでは `/aidlc-flow-slice <説明>`、Codexでは同等の `$aidlc-flow-slice <説明>` を入口とする。実際の生成コマンド名はv2.9.0のplugin projectionで確認し、両harnessの利用者向け表記をREADMEに記載する。
+Claude Codeでは `/flow-slice <説明>`、Codexでは同等の `$flow-slice <説明>` を入口とする。これはAI-DLC v2.9.0の公式plugin projectionが生成するrunnerであり、独立した疑似ワークフローではない。
+
+最初の導入単位はこのPCでのローカル利用とする。公式validator/build、両harnessへの導入、scope解決、stage graph、doctor、実intent開始までを確認してから、他PC向けの配布方法を別途整える。
 
 ## 更新時の安全性
 
