@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>aidlc-flow 縦切り開発サイクル設計</title>
+<style>
+:root{--paper:#f7f5ef;--surface:#fff;--ink:#20242a;--muted:#5f6873;--line:#d9d5cc;--accent:#294c73;--code:#20242a}
+*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;line-height:1.8}.page{max-width:980px;margin:0 auto;padding:56px 42px 120px;background:var(--surface);box-shadow:0 0 48px #0000000d}h1{font-family:serif;font-size:36px;line-height:1.4;border-bottom:3px solid var(--ink);padding-bottom:18px}h2{font-family:serif;font-size:24px;margin-top:56px;border-bottom:1px solid var(--line);padding-bottom:8px}h3{font-size:18px;margin-top:32px;color:var(--accent)}p,li{font-size:15px}a{color:var(--accent)}code{background:#f0eee8;color:var(--accent);padding:2px 6px;border-radius:5px}pre{background:var(--code);color:#e8edf3;padding:20px 24px;border-radius:12px;overflow:auto;line-height:1.6}pre code{background:transparent;color:inherit;padding:0}ul,ol{padding-left:1.6em}@media(max-width:720px){.page{padding:28px 20px 80px}h1{font-size:28px}}
+</style>
+</head>
+<body><main class="page"><h1>aidlc-flow 縦切り開発サイクル設計</h1>
+<h2>背景</h2>
+<p><a href="https://github.com/Hiroshi0900/my-tasks/issues/79">my-tasks #79</a> では、AI-DLCを使った開発に約23時間かかった一方、AI-DLCを使わない場合との比較基準がなく、継続可否を判断できないことが課題になっている。また、要件、実装、レビュー、結合テストが大きな工程として分離され、後工程の手戻りが複数Unitへ波及した。</p>
+<p>次の比較作業では、機能を小さな縦切りにし、各切片をテスト、実装、レビュー、mainへのマージまで完結させる。これを繰り返すことで、途中成果を統合可能に保ち、所要時間と品質を比較できる状態を作る。</p>
+<h2>目的</h2>
+<p><code>aidlc-flow</code> に再利用可能な <code>slice</code> ワークフローを追加する。1つのsliceを、ユーザーまたは外部利用者が認識できる小さな価値単位として扱い、1 intent、1ブランチ、1 PRでmainへ統合する。</p>
+<p>成功条件は次のとおり。</p>
+<ul>
+<li>要件からmainへのマージ準備までを、1つの短いサイクルとして実行できる。</li>
+<li>TDD、結合確認、独立レビュー、リポジトリ検査を省略せず、重複した承認やレビューを減らす。</li>
+<li>mainへ安全に入らない場合だけ、人へ分割方法や機能フラグの要否を確認する。</li>
+<li>各sliceの時間、コスト、テスト、レビュー、未検証事項を比較可能な形で残す。</li>
+<li>Claude CodeとCodexの両方で同じ意味のワークフローを利用できる。</li>
+</ul>
+<h2>対象外</h2>
+<ul>
+<li>AI-DLC本体へのアップストリーム貢献</li>
+<li>自動デプロイ</li>
+<li>人の承認なしでのpush、PR作成、mainへのマージ</li>
+<li>あらゆるsliceへの機能フラグの強制</li>
+<li>大規模な事前設計文書やUnit別の重複文書</li>
+<li>AI-DLCを使わない比較実験そのもの。このワークフローは、比較対象となるAI-DLC側の測定可能な実行形を提供する。</li>
+</ul>
+<h2>採用する構成</h2>
+<p><code>aidlc-flow</code> にプロジェクトローカルの再利用可能プラグイン <code>flow</code> を同梱する。公式AI-DLCの生成物を直接書き換えず、公式のプラグインとカスタムスコープの仕組みを利用する。公式仕様では <code>aidlc-*</code> が予約済みなので、プラグイン所有のscope名は <code>flow-slice</code> とする。</p>
+<pre><code class="language-text">aidlc-flow
+├── plugins/flow/
+│   ├── manifest
+│   ├── slice scope
+│   ├── slice-contract stage
+│   ├── slice-review stage
+│   └── merge-readiness stage
+├── bin/aidlc-flow
+└── tests/</code></pre>
+<p>初期対応バージョンはAI-DLC v2.9.0に固定する。プラグインのmanifestやステージ定義の正確なファイル形式は、v2.9.0のplugin buildと生成結果を契約テストで確定する。未確認の内部形式へ依存する実装は行わない。</p>
+<h2>ワークフロー</h2>
+<p>1つのsliceは次の順序で進む。</p>
+<pre><code class="language-text">Initialization
+    ↓
+Slice Contract
+    ↓
+Code Generation（TDD）
+    ↓
+Build and Test
+    ↓
+Slice Review
+    ↓
+Merge Readiness
+    ↓ push承認
+push・PR作成
+    ↓ CI成功・マージ承認
+PR経由でmainへマージ</code></pre>
+<h3>Initialization</h3>
+<p>intentと作業ブランチを開始し、実行環境とリポジトリ状態を確認する。slice全体を単一の価値単位として扱い、水平なコンポーネント別Unitには分解しない。</p>
+<h3>Slice Contract</h3>
+<p>実装前に、次の内容だけを固定する。</p>
+<ul>
+<li>ユーザーまたは外部利用者から観測できる受入条件を1〜3件</li>
+<li>最初に失敗させる境界テスト</li>
+<li>変更する外部境界と必要な結合確認</li>
+<li>1 PRでmainへ安全に入るか</li>
+</ul>
+<p>安全に入らない場合はここで停止し、sliceの分割、機能フラグ、一括実装のどれにするか人へ確認する。直近の既定は機能フラグなしとし、毎回の定型質問にはしない。</p>
+<h3>Code Generation</h3>
+<p>受入条件をTDDで実装する。最初に失敗するテストを確認し、必要最小限の実装で成功させ、リファクタリングする。規模が大きい場合のみcodex-phase相当の小タスクへ分けるが、すべて同一sliceの受入条件へ収束させる。</p>
+<p>計画承認はslice開始時の1回へ集約する。途中で契約を変える必要が生じた場合だけ再承認を求める。各小タスクはテスト成功と1意図のコミットまで完了させる。</p>
+<h3>Build and Test</h3>
+<p>次の順で検証する。</p>
+<ol>
+<li>変更箇所に近い対象テスト</li>
+<li>変更した境界を通る結合テスト</li>
+<li>リポジトリ標準の全体検査</li>
+</ol>
+<p>外部サービスや実機との境界を変更した場合、適用可能な範囲でローカルまたは実環境の往復確認を最低1件実施する。失敗した場合はCode Generationへ戻り、レビューへ進まない。</p>
+<h3>Slice Review</h3>
+<p>テスト成功後に、独立したレビューを1回行う。順序は以下とする。</p>
+<ol>
+<li>Slice Contractの受入条件を満たすか</li>
+<li>コード品質、エラー処理、セキュリティ、保守性に問題がないか</li>
+</ol>
+<p>CriticalまたはImportantの指摘は必ず修正する。修正後は影響するテストとリポジトリ全体の検査を再実行し、変更された範囲を再レビューする。</p>
+<p>速度を落とす重複レビューは行わない。公式Code Generation内のレビュー機構は無効化または最小化し、プラグイン所有の <code>Slice Review</code> を唯一の独立レビューとする。v2.9.0で安全に無効化できない場合は、Code Generation側を機械的な自己確認、<code>Slice Review</code>側を独立レビューとして役割分離し、同一観点の二重確認を禁止する。</p>
+<h3>Merge Readiness</h3>
+<p>Merge Readinessは、まずローカルのマージ準備を検査し、人の承認後にpushとPR作成を行う。PR作成後はCI結果を同じステージで確認する。次をすべて満たした場合だけmainへマージ可能と判定する。</p>
+<ul>
+<li>作業ツリーがクリーンで、意図した変更がすべてコミット済み</li>
+<li>mainの最新状態を取り込んだ後の検査が成功</li>
+<li>PRのCIが成功</li>
+<li>CriticalまたはImportantの未解決指摘がない</li>
+<li>未検証事項と既知の制約が明記されている</li>
+<li>人がmainへのマージを明示的に承認している</li>
+</ul>
+<p>push、PR作成、mainへのマージは別々の外部操作であり、それぞれ実行前に明示的な承認を得る。PR作成後にCI失敗や競合が発生した場合は、同じsliceブランチで修正して検査とレビューを更新する。デプロイはこのワークフローに含めない。</p>
+<p>マージ後はPR URL、マージコミットSHA、テストとレビューの証拠、所要時間、取得可能なコストを記録してintentを閉じる。次のsliceは更新済みmainから開始する。</p>
+<h2>失敗時の遷移</h2>
+<ul>
+<li><strong>Slice Contractが大きすぎる、または安全に統合できない:</strong> 実装前に停止し、分割方法を人へ確認する。</li>
+<li><strong>実装またはテストが失敗:</strong> Code Generationへ戻る。</li>
+<li><strong>Slice Reviewで必須修正が発生:</strong> 修正、Build and Test、影響範囲の再レビューを行う。</li>
+<li><strong>PR作成後にCI失敗または競合が発生:</strong> 同じsliceブランチで修正し、検査と影響範囲のレビューを更新してマージ承認を取り直す。</li>
+<li><strong>未検証事項が残る:</strong> Merge Readinessに列挙し、受入条件に関わる場合はブロック、それ以外は人の明示的な許容を求める。</li>
+</ul>
+<p>未検証事項を暗黙に成功扱いしない。</p>
+<h2>成果物</h2>
+<p>文書は判断と証拠に必要な最小限へ絞る。</p>
+<ul>
+<li><code>slice-contract.md</code>: 受入条件、境界テスト、統合可否</li>
+<li><code>verification/slice-test-results.md</code>: 実行したテスト、結果、対象外</li>
+<li><code>review/slice-review.md</code>: 指摘、対応、再レビュー結果</li>
+<li><code>merge/merge-readiness.md</code>: コミット、CI、未検証事項、承認、マージ証拠</li>
+</ul>
+<p>公式エンジンが提供する状態、再開、監査、取得可能なコスト記録は再実装しない。</p>
+<h2>aidlc-flow initの動作</h2>
+<p><code>aidlc-flow init</code> は次の順で処理する。</p>
+<ol>
+<li>インストール済みAI-DLCが対応バージョンか確認する。</li>
+<li>既存の公式AI-DLC設定を行う。</li>
+<li>同梱した <code>flow</code> pluginをインストールまたは更新する。</li>
+<li>coreの <code>aidlc</code> と <code>flow</code> の両方を有効化する。</li>
+<li>plugin buildでグラフとscopeを検証する。</li>
+<li>既存の共有Memoryをマーカー範囲内で更新する。</li>
+<li><code>aidlc doctor</code> で最終検査する。</li>
+</ol>
+<p>Claude Codeでは <code>/flow-slice &lt;説明&gt;</code>、Codexでは同等の <code>$flow-slice &lt;説明&gt;</code> を入口とする。これはAI-DLC v2.9.0の公式plugin projectionが生成するrunnerであり、独立した疑似ワークフローではない。</p>
+<p>最初の導入単位はこのPCでのローカル利用とする。公式validator/build、両harnessへの導入、scope解決、stage graph、doctor、実intent開始までを確認してから、他PC向けの配布方法を別途整える。</p>
+<h2>更新時の安全性</h2>
+<ul>
+<li>workflow進行中はプラグイン更新を拒否する。</li>
+<li>同じ入力で繰り返し実行しても結果が変わらない。</li>
+<li>管理対象外の利用者ファイルを上書きしない。</li>
+<li>管理対象プラグインが手編集されていた場合は上書きせず停止する。</li>
+<li>非対応のAI-DLCバージョンでは理由を表示して停止する。</li>
+<li>coreの <code>aidlc</code> プラグインを無効化しない。</li>
+<li>更新後のplugin buildとdoctorに失敗した場合は成功扱いにしない。</li>
+<li>既存の未コミット変更を削除、stash、commitしない。</li>
+</ul>
+<h2>テスト方針</h2>
+<p>プラグインとbootstrapについて、少なくとも次を自動検証する。</p>
+<ul>
+<li>slice scopeの経路に意図したステージだけが含まれる。</li>
+<li>Claude CodeとCodexの両projectionが生成できる。</li>
+<li><code>aidlc-flow init</code> が冪等である。</li>
+<li>workflow進行中の更新を拒否する。</li>
+<li>管理対象プラグインの手編集を検出し、上書きを拒否する。</li>
+<li>非対応バージョンを明示的に拒否する。</li>
+<li>Build and Testの失敗がレビューへ進まない。</li>
+<li>レビュー指摘後に再検査と必要範囲の再レビューへ戻る。</li>
+<li>未検証事項がMerge Readinessに残る。</li>
+<li>plugin build、<code>aidlc doctor</code>、リポジトリの <code>make check</code> が成功する。</li>
+</ul>
+<p>実装はテストを先に追加し、失敗を確認してから最小実装を行う。</p>
+<h2>比較に残す測定値</h2>
+<p>AI-DLC継続判断のため、各sliceで次を記録する。</p>
+<ul>
+<li>開始からマージ準備完了までの経過時間と実作業時間</li>
+<li>ステージ別の時間</li>
+<li>人の承認・介入回数</li>
+<li>テスト失敗、レビュー差し戻し、再実行の回数</li>
+<li>利用可能なモデル別トークン数とコスト</li>
+<li>変更ファイル数、追加・削除行数、コミット数</li>
+<li>発見した不具合と、どの段階で発見したか</li>
+<li>未検証項目</li>
+</ul>
+<p>AI-DLCなしのcodex-phase単体でも同じ項目を測り、規模が近い作業同士で比較する。単一の合計時間だけで優劣を判断せず、統合まで到達した品質証拠と手戻りも併記する。</p>
+<h2>導入判断</h2>
+<p>まずAI-DLC v2.9.0とaidlc-flowの範囲で実装し、実際のsliceを1件通す。その結果、レビューの一本化や必要なステージ遷移を公式プラグイン機構だけで表現できない場合は、非公開な内部ファイルの直接編集へ進まず、次のいずれかを改めて選ぶ。</p>
+<ol>
+<li>表現可能な範囲へワークフローを簡略化する。</li>
+<li>aidlc-flow側のラッパーで不足部分を補う。</li>
+<li>公式AI-DLCへ機能提案または貢献する。</li>
+</ol>
+<p>この順序により、保守負担を増やす前に効果を測定する。</p></main></body>
+</html>

@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Vertical Slice Workflow Local-First Implementation Plan</title>
+<style>
+:root{--paper:#f7f5ef;--surface:#fff;--ink:#20242a;--muted:#5f6873;--line:#d9d5cc;--accent:#294c73;--code:#20242a}
+*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;line-height:1.8}.page{max-width:980px;margin:0 auto;padding:56px 42px 120px;background:var(--surface);box-shadow:0 0 48px #0000000d}h1{font-family:serif;font-size:36px;line-height:1.4;border-bottom:3px solid var(--ink);padding-bottom:18px}h2{font-family:serif;font-size:24px;margin-top:56px;border-bottom:1px solid var(--line);padding-bottom:8px}h3{font-size:18px;margin-top:32px;color:var(--accent)}p,li{font-size:15px}a{color:var(--accent)}code{background:#f0eee8;color:var(--accent);padding:2px 6px;border-radius:5px}pre{background:var(--code);color:#e8edf3;padding:20px 24px;border-radius:12px;overflow:auto;line-height:1.6}pre code{background:transparent;color:inherit;padding:0}ul,ol{padding-left:1.6em}@media(max-width:720px){.page{padding:28px 20px 80px}h1{font-size:28px}}
+</style>
+</head>
+<body><main class="page"><h1>Vertical Slice Workflow Local-First Implementation Plan</h1>
+<p>&gt; <strong>For agentic workers:</strong> REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (<code>- [ ]</code>) syntax for tracking.</p>
+<p><strong>Goal:</strong> このPCのCodexとClaude Codeから、公式AI-DLC v2.9.0の状態管理を使う縦切りワークフローを <code>$flow-slice</code> / <code>/flow-slice</code> で開始できるようにする。</p>
+<p><strong>Architecture:</strong> 公式仕様に適合する <code>plugins/flow/</code> をsource of truthとし、scope <code>flow-slice</code> と3つのplugin stageをAI-DLCのstage graphへ合成する。<code>aidlc-flow</code> は公式source validator/buildでCodex・Claude projectionを生成し、各hostへローカル導入してから、公式plugin sync・scope validation・doctorで確認する。配布の一般化は対象外だが、sourceとprojectionは後から配布できる構造を保つ。</p>
+<p><strong>Tech Stack:</strong> POSIX shell、AI-DLC CLI v2.9.0 plugin API、Bun、Codex/Claude local plugin marketplace、Markdown stage/scope definitions</p>
+<p>---</p>
+<h2>完了条件</h2>
+<ul>
+<li><code>plugins/flow/</code> がAI-DLC v2.9.0の公式source validatorを通る。</li>
+<li>CodexとClaudeの公式projectionが生成される。</li>
+<li>隔離した一時プロジェクトで <code>flow-slice</code> scopeが次の順に解決される。</li>
+<p><code>workspace-scaffold → workspace-detection → state-init → flow-slice-contract → code-generation → build-and-test → flow-slice-review → flow-merge-readiness</code></p>
+<li>このPCの実プロジェクトへ <code>aidlc-flow init</code> で導入できる。</li>
+<li>Codexでは <code>$flow-slice</code>、Claudeでは <code>/flow-slice</code> がAI-DLC engineへ接続する。</li>
+<li>実intentを作成し、scopeと最初のstageがAI-DLCの状態ファイルへ記録される。</li>
+<li><code>make check</code> が成功し、変更は1意図ごとにコミットされる。</li>
+<li>push、PR、main merge、deployは行わない。</li>
+</ul>
+<h2>Task 3: Plugin sourceを公式v2.9.0契約へ修正する</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Rename: <code>plugins/aidlc-flow-slice/</code> → <code>plugins/flow/</code></li>
+<li>Modify: <code>plugins/flow/.aidlc-plugin/plugin.json</code></li>
+<li>Modify: <code>plugins/flow/scopes/flow-slice.md</code></li>
+<li>Modify: <code>plugins/flow/stages/inception/flow-slice-contract.md</code></li>
+<li>Modify: <code>plugins/flow/stages/construction/flow-slice-review.md</code></li>
+<li>Modify: <code>plugins/flow/stages/construction/flow-merge-readiness.md</code></li>
+<li>Modify: <code>plugins/flow/contributions/**/*.md</code></li>
+<li>Modify: <code>tests/plugin-source-test.sh</code></li>
+<li>Modify: <code>tests/slice-routing-test.sh</code></li>
+</ul>
+<ul>
+<li>[ ] <strong>Step 1: 公式命名とschemaを要求する失敗テストを書く</strong></li>
+</ul>
+<p>テストは次を要求する。</p>
+<pre><code class="language-sh">plugin=&quot;$root/plugins/flow&quot;
+assert_contains &quot;$(cat &quot;$plugin/.aidlc-plugin/plugin.json&quot;)&quot; '&quot;name&quot;: &quot;flow&quot;' &quot;manifest name matches root&quot;
+assert_contains &quot;$(cat &quot;$plugin/.aidlc-plugin/plugin.json&quot;)&quot; '&quot;overlays&quot;: &quot;contributions/&quot;' &quot;manifest uses official overlay key&quot;
+assert_contains &quot;$(cat &quot;$plugin/scopes/flow-slice.md&quot;)&quot; 'name: flow-slice' &quot;scope uses plugin prefix&quot;
+assert_contains &quot;$(cat &quot;$plugin/stages/inception/flow-slice-contract.md&quot;)&quot; 'slug: flow-slice-contract' &quot;contract stage uses plugin prefix&quot;</code></pre>
+<ul>
+<li>[ ] <strong>Step 2: <code>/bin/sh tests/plugin-source-test.sh &amp;&amp; /bin/sh tests/slice-routing-test.sh</code> を実行し、旧source名で失敗することを確認する</strong></li>
+</ul>
+<ul>
+<li>[ ] <strong>Step 3: sourceを最小修正する</strong></li>
+</ul>
+<p>manifestは次の公式キーだけを使う。</p>
+<pre><code class="language-json">{
+  &quot;name&quot;: &quot;flow&quot;,
+  &quot;version&quot;: &quot;0.1.0&quot;,
+  &quot;description&quot;: &quot;Deliver one vertical slice through test, review, and merge readiness.&quot;,
+  &quot;author&quot;: { &quot;name&quot;: &quot;aidlc-flow&quot; },
+  &quot;dependencies&quot;: [&quot;core&quot;],
+  &quot;aidlc&quot;: {
+    &quot;contributes&quot;: {
+      &quot;stages&quot;: &quot;stages/&quot;,
+      &quot;scopes&quot;: &quot;scopes/&quot;,
+      &quot;overlays&quot;: &quot;contributions/&quot;
+    }
+  }
+}</code></pre>
+<p>plugin所有のscope、stage slug、produces artifactはすべて <code>flow-</code> prefixを付ける。core stageへのcontributionは <code>adds.scopes: [flow-slice]</code> を使う。</p>
+<ul>
+<li>[ ] <strong>Step 4: 個別テストと <code>make check</code> を成功させる</strong></li>
+</ul>
+<ul>
+<li>[ ] <strong>Step 5: <code>git commit -m &quot;fix: align slice plugin with aidlc contract&quot;</code> でコミットする</strong></li>
+</ul>
+<h2>Task 4: 公式source validatorとprojection buildを動かす</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>lib/aidlc-plugin-tools.sh</code></li>
+<li>Create: <code>tests/plugin-build-test.sh</code></li>
+<li>Modify: <code>tests/testlib.sh</code></li>
+<li>Modify: <code>install.sh</code></li>
+<li>Modify: <code>tests/install-test.sh</code></li>
+</ul>
+<ul>
+<li>[ ] <strong>Step 1: Bunと公式tool pathを要求する失敗テストを書く</strong></li>
+</ul>
+<pre><code class="language-sh">require_plugin_toolchain
+validate_flow_plugin &quot;$root/plugins/flow&quot;
+build_flow_projection codex &quot;$tmp/codex&quot; &quot;$root/plugins/flow&quot;
+build_flow_projection claude &quot;$tmp/claude&quot; &quot;$root/plugins/flow&quot;</code></pre>
+<p><code>AIDLC_FLOW_BUN</code> と <code>AIDLC_FLOW_AIDLC_HOME</code> をテスト用に上書き可能にし、本番ではPATH上の<code>bun</code>と、active version markerから求めたAI-DLC runtimeを使う。</p>
+<ul>
+<li>[ ] <strong>Step 2: <code>/bin/sh tests/plugin-build-test.sh</code> を実行し、helper未実装で失敗することを確認する</strong></li>
+</ul>
+<ul>
+<li>[ ] <strong>Step 3: 公式TypeScript toolを呼ぶhelperを実装する</strong></li>
+</ul>
+<pre><code class="language-sh">&quot;$aidlc_flow_bun&quot; &quot;$aidlc_flow_tools/aidlc-plugin-validate.ts&quot; &quot;$plugin_root&quot;
+&quot;$aidlc_flow_bun&quot; &quot;$aidlc_flow_tools/aidlc-plugin-build.ts&quot; \
+  &quot;$harness&quot; &quot;$output_dir&quot; --plugin-root &quot;$plugin_root&quot;</code></pre>
+<p>コンパイル済み <code>aidlc plugin validate/build</code> はv2.9.0でbundled data pathを誤解決するため使用しない。迂回ではなく、同梱されている公式source toolを公式ガイドどおりBunで実行する。</p>
+<ul>
+<li>[ ] <strong>Step 4: <code>install.sh</code> がsourceを配置し、両projectionをtransactionalに生成するよう拡張する</strong></li>
+</ul>
+<ul>
+<li>[ ] <strong>Step 5: plugin build、installer、全体検査を成功させる</strong></li>
+</ul>
+<p>Run: <code>/bin/sh tests/plugin-build-test.sh &amp;&amp; /bin/sh tests/install-test.sh &amp;&amp; make check</code></p>
+<ul>
+<li>[ ] <strong>Step 6: <code>git commit -m &quot;feat: build local slice projections&quot;</code> でコミットする</strong></li>
+</ul>
+<h2>Task 5: <code>aidlc-flow init</code> で両hostへローカル導入する</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>lib/plugin.sh</code></li>
+<li>Create: <code>tests/plugin-install-test.sh</code></li>
+<li>Modify: <code>bin/aidlc-flow</code></li>
+<li>Modify: <code>lib/codex.sh</code></li>
+<li>Modify: <code>lib/claude.sh</code></li>
+<li>Modify: <code>tests/bootstrap-test.sh</code></li>
+<li>Modify: <code>tests/workflow-preflight-test.sh</code></li>
+</ul>
+<ul>
+<li>[ ] <strong>Step 1: host導入順序の失敗テストを書く</strong></li>
+</ul>
+<p>Codexはlocal marketplace登録、<code>flow@aidlc-flow</code> 有効化、AI-DLC plugin select/syncの順、Claudeも対応するproject-local marketplace/install、select/syncの順を要求する。2回目は同じsourceなら無変更で成功し、異なるsourceの同名marketplaceは上書きせず停止する。</p>
+<ul>
+<li>[ ] <strong>Step 2: <code>/bin/sh tests/plugin-install-test.sh &amp;&amp; /bin/sh tests/bootstrap-test.sh</code> を実行し、helper未実装で失敗することを確認する</strong></li>
+</ul>
+<ul>
+<li>[ ] <strong>Step 3: <code>install_flow_plugin PROJECT HARNESS PROJECTION</code> を実装する</strong></li>
+</ul>
+<p>host CLIのJSON inventoryを読み、既存設定を壊さずlocal projectionを登録する。その後、プロジェクト内で次を実行する。</p>
+<pre><code class="language-sh">aidlc config project --project-dir &quot;$project&quot; --plugins flow --yes
+AIDLC_HARNESS_DIR=&quot;.$harness&quot; AIDLC_HARNESS_NAME=&quot;$harness&quot; \
+  aidlc engine plugin sync</code></pre>
+<ul>
+<li>[ ] <strong>Step 4: <code>aidlc-flow init</code> を core config → plugin導入/sync → Memory merge → doctor の順へ統合する</strong></li>
+</ul>
+<ul>
+<li>[ ] <strong>Step 5: 開始表示を <code>$flow-slice &lt;your slice&gt;</code> / <code>/flow-slice &lt;your slice&gt;</code> へ変更する</strong></li>
+</ul>
+<ul>
+<li>[ ] <strong>Step 6: 個別テストと <code>make check</code> を成功させる</strong></li>
+</ul>
+<ul>
+<li>[ ] <strong>Step 7: <code>git commit -m &quot;feat: initialize local slice workflow&quot;</code> でコミットする</strong></li>
+</ul>
+<h2>Task 6: 実AI-DLCでscopeとintentを検証する</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>tests/plugin-integration-test.sh</code></li>
+<li>Modify: <code>README.md</code></li>
+<li>Modify: <code>tests/cli-test.sh</code></li>
+</ul>
+<ul>
+<li>[ ] <strong>Step 1: 隔離したCodex/Claude設定で実projectionを導入する統合テストを書く</strong></li>
+</ul>
+<p>テストは一時Gitリポジトリと一時host homeを使い、利用者の既存設定を書き換えない。両harnessで次を検証する。</p>
+<pre><code class="language-sh">aidlc engine graph validate-scope flow-slice
+aidlc engine gen scope-table
+aidlc doctor --project-dir &quot;$project&quot; --quiet
+aidlc engine orchestrate next --scope flow-slice -- &quot;local slice smoke test&quot;</code></pre>
+<p>最後の出力がintent作成directiveであること、作成後の状態にscope <code>flow-slice</code> と最初のstageが記録されることを確認する。テスト中にpush、PR、merge、deployは行わない。</p>
+<ul>
+<li>[ ] <strong>Step 2: 統合テストを実行し、未導入状態で失敗することを確認する</strong></li>
+</ul>
+<ul>
+<li>[ ] <strong>Step 3: 必要最小限の導入修正を行い、Codex/Claude双方で統合テストを成功させる</strong></li>
+</ul>
+<ul>
+<li>[ ] <strong>Step 4: READMEへローカル導入、起動名、AI-DLC stateの確認方法、現在はローカル利用を完了点とすることを記載する</strong></li>
+</ul>
+<ul>
+<li>[ ] <strong>Step 5: このPCの実インストールへ <code>install.sh</code> と <code>aidlc-flow init</code> を適用し、<code>flow-slice</code> runnerの存在とdoctorを確認する</strong></li>
+</ul>
+<ul>
+<li>[ ] <strong>Step 6: <code>make check</code>、<code>git diff --check</code>、<code>git status --short</code> を確認する</strong></li>
+</ul>
+<ul>
+<li>[ ] <strong>Step 7: <code>git commit -m &quot;test: verify local aidlc slice workflow&quot;</code> でコミットする</strong></li>
+</ul>
+<ul>
+<li>[ ] <strong>Step 8: コミット後に <code>make check &amp;&amp; git status --short --branch</code> を再実行する</strong></li>
+</ul>
+<h2>実装中の報告ルール</h2>
+<ul>
+<li>「プロジェクト内テストが通った」と「このPCのAI-DLCで起動した」を分けて報告する。</li>
+<li>失敗時は、ユーザーが実行できる機能への影響を先に説明し、内部名称だけを単独で報告しない。</li>
+<li>ローカル起動が確認できるまで「使える」「完成」と表現しない。</li>
+<li>外部配布は今回の完了条件に含めない。</li>
+</ul></main></body>
+</html>

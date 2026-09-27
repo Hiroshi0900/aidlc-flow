@@ -5,13 +5,45 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 tmp=$(new_tmpdir)
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+tmp=$(CDPATH= cd -- "$tmp" && pwd -P)
 project="$tmp/project"
 fake_bin="$tmp/bin"
-mkdir -p "$project" "$fake_bin"
+projection="$tmp/plugin-dist/claude"
+mkdir -p "$project" "$fake_bin" "$projection/.claude-plugin" "$projection/hooks"
 git -C "$project" init -q
+printf '%s\n' '{"schema":1,"producer":"aidlc-plugin-build","plugin":"flow","harness":"claude"}' > "$projection/.aidlc-plugin-projection.json"
+printf '%s\n' '{"name":"aidlc-flow","version":"0.1.0"}' > "$projection/.claude-plugin/plugin.json"
+printf '%s\n' '{"name":"aidlc-plugins","plugins":[{"name":"aidlc-flow","source":".","version":"0.1.0"}]}' > "$projection/.claude-plugin/marketplace.json"
+printf '%s\n' 'export async function compose() {}' > "$projection/hooks/compose.ts"
+
+cat > "$fake_bin/claude" <<'SH'
+#!/bin/sh
+case "$*" in
+  'plugin marketplace list --json') printf '%s\n' '[]' ;;
+  'plugin list --json') printf '%s\n' '[]' ;;
+  'plugin marketplace add --scope project '*|'plugin install --scope project --yes '*) ;;
+  *) exit 8 ;;
+esac
+SH
+chmod +x "$fake_bin/claude"
 
 cat > "$fake_bin/aidlc" <<'SH'
 #!/bin/sh
+if [ "$*" = '--version' ]; then
+  printf '%s\n' 'aidlc 2.9.0 (runtime 2.9.0)'
+  exit 0
+fi
+if [ "$*" = 'engine plugin sync' ]; then
+  mkdir -p "$PWD/${AIDLC_HARNESS_DIR:-.claude}/tools/data"
+  [ -f "$PWD/${AIDLC_HARNESS_DIR:-.claude}/tools/data/harness.json" ] ||
+    printf '%s\n' '{}' > "$PWD/${AIDLC_HARNESS_DIR:-.claude}/tools/data/harness.json"
+  exit 0
+fi
+if [ "$*" = 'engine plugin list --json' ]; then
+  printf '%s\n' '{"schemaVersion":1,"ok":true,"data":{"statuses":[{"key":"flow","state":"current"}]}}'
+  exit 0
+fi
+case "$*" in 'engine gen runners'|'engine gen runner-scopes') exit 0 ;; esac
 command_name=$1
 shift
 project_dir=$PWD
@@ -48,7 +80,7 @@ esac
 SH
 chmod +x "$fake_bin/aidlc"
 
-PATH="$fake_bin:$PATH" "$root/bin/aidlc-flow" init --harness claude --project-dir "$project" >/dev/null
+AIDLC_FLOW_PLUGIN_DIST="$tmp/plugin-dist" PATH="$fake_bin:$PATH" "$root/bin/aidlc-flow" init --harness claude --project-dir "$project" >/dev/null
 settings=$(cat "$project/.claude/settings.json")
 
 case "$settings" in

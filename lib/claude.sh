@@ -48,5 +48,5 @@ PY
 }
 
 print_start_hint() {
-  printf '%s\n' 'Start Claude Code in this repository, approve project hooks, then invoke /aidlc <your idea>.'
+  printf '%s\n' 'Start Claude Code in this repository, approve project hooks, then invoke /flow-slice <your slice>.'
 }

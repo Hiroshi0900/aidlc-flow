@@ -6,5 +6,5 @@ configure_harness() {
 }
 
 print_start_hint() {
-  printf '%s\n' 'Start Codex in this repository, approve the hook trust prompt, then invoke $aidlc <your idea>.'
+  printf '%s\n' 'Start Codex in this repository, approve the hook trust prompt, then invoke $flow-slice <your slice>.'
 }

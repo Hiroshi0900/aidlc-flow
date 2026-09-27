@@ -15,17 +15,79 @@ root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 caller_dir=$(CDPATH= cd -- . && pwd)
 tmp=$(new_tmpdir)
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+tmp=$(CDPATH= cd -- "$tmp" && pwd -P)
 project="$tmp/project"
 fake_bin="$tmp/bin"
+projection_root="$tmp/plugin-dist"
 mkdir -p "$project" "$fake_bin"
 project=$(CDPATH= cd -- "$project" && pwd -P)
 git -C "$project" init -q
 project_link="$tmp/project-link"
 ln -s "$project" "$project_link"
 
+for fixture_harness in codex claude; do
+  fixture="$projection_root/$fixture_harness"
+  mkdir -p "$fixture/.$fixture_harness-plugin" "$fixture/hooks"
+  printf '%s\n' "{\"schema\":1,\"producer\":\"aidlc-plugin-build\",\"plugin\":\"flow\",\"harness\":\"$fixture_harness\"}" > "$fixture/.aidlc-plugin-projection.json"
+  printf '%s\n' '{"name":"aidlc-flow","version":"0.1.0"}' > "$fixture/.$fixture_harness-plugin/plugin.json"
+  printf '%s\n' '{"name":"aidlc-plugins","plugins":[{"name":"aidlc-flow","source":".","version":"0.1.0"}]}' > "$fixture/.$fixture_harness-plugin/marketplace.json"
+  printf '%s\n' 'export async function compose() {}' > "$fixture/hooks/compose.ts"
+  if [ "$fixture_harness" = codex ]; then
+    mkdir -p "$fixture/.agents/plugins"
+    printf '%s\n' '{"name":"aidlc-plugins","plugins":[{"name":"aidlc-flow","source":{"source":"local","path":"./"},"policy":{"installation":"AVAILABLE","authentication":"ON_USE"}}]}' > "$fixture/.agents/plugins/marketplace.json"
+  fi
+done
+
+cat > "$fake_bin/codex" <<'SH'
+#!/bin/sh
+printf 'codex|%s|%s\n' "$PWD" "$*" >> "$HOST_FAKE_LOG"
+[ -z "${BOOTSTRAP_ORDER_LOG:-}" ] || printf 'codex|%s|%s\n' "$PWD" "$*" >> "$BOOTSTRAP_ORDER_LOG"
+case "$*" in
+  'plugin marketplace list --json') printf '%s\n' '{"marketplaces":[]}' ;;
+  'plugin list --json') printf '%s\n' '{"installed":[],"available":[]}' ;;
+  'plugin marketplace add '*|'plugin add '*) exit 0 ;;
+  *) exit 91 ;;
+esac
+SH
+cat > "$fake_bin/claude" <<'SH'
+#!/bin/sh
+printf 'claude|%s|%s\n' "$PWD" "$*" >> "$HOST_FAKE_LOG"
+[ -z "${BOOTSTRAP_ORDER_LOG:-}" ] || printf 'claude|%s|%s\n' "$PWD" "$*" >> "$BOOTSTRAP_ORDER_LOG"
+case "$*" in
+  'plugin marketplace list --json') printf '%s\n' '[]' ;;
+  'plugin list --json') printf '%s\n' '[]' ;;
+  'plugin marketplace add --scope project '*|'plugin install --scope project --yes '*) exit 0 ;;
+  *) exit 92 ;;
+esac
+SH
+chmod +x "$fake_bin/codex" "$fake_bin/claude"
+
 cat > "$fake_bin/aidlc" <<'SH'
 #!/bin/sh
+if [ "$*" = "--version" ]; then
+  printf '%s\n' 'aidlc 2.9.0 (runtime 2.9.0)'
+  exit 0
+fi
 printf '%s|%s\n' "$PWD" "$*" >> "$AIDLC_FAKE_LOG"
+[ -z "${BOOTSTRAP_ORDER_LOG:-}" ] || printf 'aidlc|%s|%s\n' "$PWD" "$*" >> "$BOOTSTRAP_ORDER_LOG"
+if [ "$*" = "engine plugin sync" ]; then
+  [ "${AIDLC_FAKE_SYNC_STATUS:-0}" -eq 0 ] || exit "$AIDLC_FAKE_SYNC_STATUS"
+  fake_harness=${AIDLC_HARNESS_DIR:-.codex}
+  mkdir -p "$PWD/$fake_harness/tools/data"
+  [ -f "$PWD/$fake_harness/tools/data/harness.json" ] ||
+    printf '%s\n' '{"plugins":["aidlc"]}' > "$PWD/$fake_harness/tools/data/harness.json"
+  exit 0
+fi
+if [ "$*" = "engine plugin list --json" ]; then
+  printf '%s\n' '{"schemaVersion":1,"ok":true,"data":{"statuses":[{"key":"flow","state":"current"}]}}'
+  exit 0
+fi
+if [ "$*" = "engine plugin select aidlc flow" ]; then
+  [ "${AIDLC_FAKE_SELECT_STATUS:-0}" -eq 0 ] || exit "$AIDLC_FAKE_SELECT_STATUS"
+  printf '%s\n' '{"plugins":["aidlc","flow"]}' > "$PWD/${AIDLC_HARNESS_DIR:-.codex}/tools/data/harness.json"
+  exit 0
+fi
+case "$*" in 'engine gen runners'|'engine gen runner-scopes') exit 0 ;; esac
 fake_command=$1
 shift
 fake_project=
@@ -68,17 +130,40 @@ esac
 SH
 chmod +x "$fake_bin/aidlc"
 export AIDLC_FAKE_LOG="$tmp/aidlc.log"
+export HOST_FAKE_LOG="$tmp/host.log"
+export BOOTSTRAP_ORDER_LOG="$tmp/order.log"
+export AIDLC_FLOW_PLUGIN_DIST="$projection_root"
 decoy="$tmp/decoy"
 mkdir -p "$decoy"
 
 output=$(AIDLC_PROJECT_DIR="$decoy" CLAUDE_PROJECT_DIR="$decoy" PATH="$fake_bin:$PATH" "$root/bin/aidlc-flow" init --harness codex --project-dir "$project_link")
 log=$(cat "$AIDLC_FAKE_LOG")
 expected_log="$project|config --project-dir $project --harness codex --mcp none --quiet
+$project|engine plugin sync
+$project|engine plugin list --json
+$project|engine plugin select aidlc flow
+$project|engine plugin sync
+$project|engine gen runners
+$project|engine gen runner-scopes
+$project|engine plugin list --json
 $caller_dir|doctor --project-dir $project --quiet"
 assert_eq "$log" "$expected_log" "codex config and doctor are called in order"
+assert_eq "$(cat "$BOOTSTRAP_ORDER_LOG")" "aidlc|$project|config --project-dir $project --harness codex --mcp none --quiet
+codex|$project|plugin marketplace list --json
+codex|$project|plugin marketplace add $projection_root/codex
+codex|$project|plugin list --json
+codex|$project|plugin add aidlc-flow@aidlc-plugins
+aidlc|$project|engine plugin sync
+aidlc|$project|engine plugin list --json
+aidlc|$project|engine plugin select aidlc flow
+aidlc|$project|engine plugin sync
+aidlc|$project|engine gen runners
+aidlc|$project|engine gen runner-scopes
+aidlc|$project|engine plugin list --json
+aidlc|$caller_dir|doctor --project-dir $project --quiet" "bootstrap performs core config, host install, selection, sync, then doctor"
 [ ! -e "$decoy/aidlc" ] || fail "codex config ignores a conflicting environment project"
 assert_contains "$output" "aidlc-flow: configured codex for $project" "codex completion is printed"
-assert_contains "$output" 'invoke $aidlc <your idea>' "codex start hint is printed"
+assert_contains "$output" 'invoke $flow-slice <your slice>' "codex start hint is printed"
 assert_contains "$(cat "$project/aidlc/spaces/default/memory/team.md")" "official team seed" "official team seed is preserved"
 assert_contains "$(cat "$project/aidlc/spaces/default/memory/team.md")" "commit SHA" "team memory is installed"
 assert_contains "$(cat "$project/aidlc/spaces/default/memory/phases/construction.md")" "official construction seed" "official construction seed is preserved"
@@ -120,6 +205,13 @@ TMPDIR="$tmp" PATH="$fake_bin:$PATH" "$root/bin/aidlc-flow" init --harness codex
 after=$(cksum "$ignored_project/aidlc/spaces/default/memory/team.md" "$ignored_project/aidlc/spaces/default/memory/phases/construction.md")
 assert_eq "$after" "$before" "unchanged ignored managed memory is allowed and byte-identical"
 assert_eq "$(cat "$AIDLC_FAKE_LOG")" "$ignored_project|config --project-dir $ignored_project --harness codex --mcp none --quiet
+$ignored_project|engine plugin sync
+$ignored_project|engine plugin list --json
+$ignored_project|engine plugin select aidlc flow
+$ignored_project|engine plugin sync
+$ignored_project|engine gen runners
+$ignored_project|engine gen runner-scopes
+$ignored_project|engine plugin list --json
 $caller_dir|doctor --project-dir $ignored_project --quiet" "unchanged ignored memory completes config then doctor"
 awk '
   /<!-- END aidlc-flow:team -->/ { print "edited ignored managed content" }
@@ -158,9 +250,16 @@ rm "$project/local-note.txt"
 output=$(AIDLC_PROJECT_DIR="$decoy" CLAUDE_PROJECT_DIR="$decoy" PATH="$fake_bin:$PATH" "$root/bin/aidlc-flow" init --harness claude --project-dir "$project")
 assert_eq "$(cat "$AIDLC_FAKE_LOG")" "$project|config --project-dir $project --harness claude --mcp none --quiet
 $project|config providers --project-dir $project --provider other --acknowledge --yes
+$project|engine plugin sync
+$project|engine plugin list --json
+$project|engine plugin select aidlc flow
+$project|engine plugin sync
+$project|engine gen runners
+$project|engine gen runner-scopes
+$project|engine plugin list --json
 $caller_dir|doctor --project-dir $project --quiet" "claude config and doctor are called in order"
 assert_contains "$output" "aidlc-flow: configured claude for $project" "claude completion is printed"
-assert_contains "$output" "invoke /aidlc <your idea>" "claude start hint is printed"
+assert_contains "$output" "invoke /flow-slice <your slice>" "claude start hint is printed"
 
 awk '
   /<!-- END aidlc-flow:team -->/ { print "locally edited managed content" }
@@ -227,7 +326,14 @@ status=$?
 set -e
 assert_eq "$status" "1" "managed path symlink created by config is rejected"
 assert_contains "$(cat "$tmp/symlink-post.err")" "symbolic link" "post-config symlink has a specific diagnostic"
-assert_eq "$(cat "$AIDLC_FAKE_LOG")" "$symlink_post_project|config --project-dir $symlink_post_project --harness codex --mcp none --quiet" "post-config symlink stops before doctor"
+assert_eq "$(cat "$AIDLC_FAKE_LOG")" "$symlink_post_project|config --project-dir $symlink_post_project --harness codex --mcp none --quiet
+$symlink_post_project|engine plugin sync
+$symlink_post_project|engine plugin list --json
+$symlink_post_project|engine plugin select aidlc flow
+$symlink_post_project|engine plugin sync
+$symlink_post_project|engine gen runners
+$symlink_post_project|engine gen runner-scopes
+$symlink_post_project|engine plugin list --json" "post-config symlink stops before doctor"
 [ ! -e "$symlink_post_outside/team.md" ] || fail "post-config symlink leaves repository-external team memory unchanged"
 [ ! -e "$symlink_post_outside/phases" ] || fail "post-config symlink leaves repository-external phase memory unchanged"
 assert_not_contains "$output" "aidlc-flow: configured" "post-config symlink failure has no success output"
@@ -246,6 +352,52 @@ assert_eq "$(cat "$AIDLC_FAKE_LOG")" "$config_fail_project|config --project-dir 
 [ ! -e "$config_fail_project/aidlc" ] || fail "config failure does not create managed memory"
 assert_not_contains "$output" "aidlc-flow: configured" "config failure has no success output"
 
+select_fail_project="$tmp/select-fail-project"
+mkdir -p "$select_fail_project"
+select_fail_project=$(CDPATH= cd -- "$select_fail_project" && pwd -P)
+git -C "$select_fail_project" init -q
+: > "$AIDLC_FAKE_LOG"
+set +e
+output=$(AIDLC_FAKE_SELECT_STATUS=25 PATH="$fake_bin:$PATH" "$root/bin/aidlc-flow" init --harness codex --project-dir "$select_fail_project" 2>"$tmp/select-fail.err")
+status=$?
+set -e
+assert_eq "$status" "25" "plugin selection failure status is propagated"
+assert_eq "$(cat "$AIDLC_FAKE_LOG")" "$select_fail_project|config --project-dir $select_fail_project --harness codex --mcp none --quiet
+$select_fail_project|engine plugin sync
+$select_fail_project|engine plugin list --json
+$select_fail_project|engine plugin select aidlc flow" "selection failure stops before final sync and doctor"
+assert_not_contains "$output" "aidlc-flow: configured" "selection failure has no success output"
+
+sync_fail_project="$tmp/sync-fail-project"
+mkdir -p "$sync_fail_project"
+sync_fail_project=$(CDPATH= cd -- "$sync_fail_project" && pwd -P)
+git -C "$sync_fail_project" init -q
+: > "$AIDLC_FAKE_LOG"
+set +e
+output=$(AIDLC_FAKE_SYNC_STATUS=26 PATH="$fake_bin:$PATH" "$root/bin/aidlc-flow" init --harness codex --project-dir "$sync_fail_project" 2>"$tmp/sync-fail.err")
+status=$?
+set -e
+assert_eq "$status" "26" "plugin sync failure status is propagated"
+assert_eq "$(cat "$AIDLC_FAKE_LOG")" "$sync_fail_project|config --project-dir $sync_fail_project --harness codex --mcp none --quiet
+$sync_fail_project|engine plugin sync" "sync failure stops before doctor"
+assert_not_contains "$output" "aidlc-flow: configured" "sync failure has no success output"
+
+active_project="$tmp/active-project"
+mkdir -p "$active_project/aidlc/spaces/default/intents"
+active_project=$(CDPATH= cd -- "$active_project" && pwd -P)
+git -C "$active_project" init -q
+printf '%s\n' '**Status**: in_progress' > "$active_project/aidlc/spaces/default/intents/current.md"
+: > "$AIDLC_FAKE_LOG"
+: > "$HOST_FAKE_LOG"
+set +e
+output=$(PATH="$fake_bin:$PATH" "$root/bin/aidlc-flow" init --harness codex --project-dir "$active_project" 2>"$tmp/active.err")
+status=$?
+set -e
+assert_eq "$status" "1" "active workflow is rejected"
+assert_eq "$(cat "$AIDLC_FAKE_LOG")" "" "active workflow stops before core configuration"
+assert_eq "$(cat "$HOST_FAKE_LOG")" "" "active workflow stops before host mutation"
+assert_not_contains "$output" "aidlc-flow: configured" "active workflow failure has no success output"
+
 merge_fail_project="$tmp/merge-fail-project"
 mkdir -p "$merge_fail_project/aidlc/spaces/default/memory/phases"
 merge_fail_project=$(CDPATH= cd -- "$merge_fail_project" && pwd -P)
@@ -263,7 +415,14 @@ set -e
 after=$(cksum "$merge_fail_project/aidlc/spaces/default/memory/team.md")
 assert_eq "$status" "1" "managed memory merge failure exits 1"
 assert_eq "$after" "$before" "managed memory merge failure preserves existing memory"
-assert_eq "$(cat "$AIDLC_FAKE_LOG")" "$merge_fail_project|config --project-dir $merge_fail_project --harness codex --mcp none --quiet" "managed memory merge failure stops before doctor"
+assert_eq "$(cat "$AIDLC_FAKE_LOG")" "$merge_fail_project|config --project-dir $merge_fail_project --harness codex --mcp none --quiet
+$merge_fail_project|engine plugin sync
+$merge_fail_project|engine plugin list --json
+$merge_fail_project|engine plugin select aidlc flow
+$merge_fail_project|engine plugin sync
+$merge_fail_project|engine gen runners
+$merge_fail_project|engine gen runner-scopes
+$merge_fail_project|engine plugin list --json" "managed memory merge failure stops before doctor"
 assert_contains "$(cat "$tmp/merge-fail.err")" "failed to update managed memory: $merge_fail_project/aidlc/spaces/default/memory/team.md" "merge failure has a general diagnostic"
 assert_not_contains "$output" "aidlc-flow: configured" "merge failure has no success output"
 
@@ -278,6 +437,13 @@ status=$?
 set -e
 assert_eq "$status" "24" "doctor failure status is propagated"
 assert_eq "$(cat "$AIDLC_FAKE_LOG")" "$doctor_fail_project|config --project-dir $doctor_fail_project --harness codex --mcp none --quiet
+$doctor_fail_project|engine plugin sync
+$doctor_fail_project|engine plugin list --json
+$doctor_fail_project|engine plugin select aidlc flow
+$doctor_fail_project|engine plugin sync
+$doctor_fail_project|engine gen runners
+$doctor_fail_project|engine gen runner-scopes
+$doctor_fail_project|engine plugin list --json
 $caller_dir|doctor --project-dir $doctor_fail_project --quiet" "doctor failure occurs after config and memory merge"
 assert_contains "$(cat "$doctor_fail_project/aidlc/spaces/default/memory/team.md")" "commit SHA" "memory is merged before doctor"
 assert_not_contains "$output" "aidlc-flow: configured" "doctor failure has no success output"
@@ -290,6 +456,13 @@ git -C "$alternate_project" init -q
 output=$(AIDLC_FAKE_SPACE=alternate PATH="$fake_bin:$PATH" "$root/bin/aidlc-flow" init --harness claude --project-dir "$alternate_project")
 assert_eq "$(cat "$AIDLC_FAKE_LOG")" "$alternate_project|config --project-dir $alternate_project --harness claude --mcp none --quiet
 $alternate_project|config providers --project-dir $alternate_project --provider other --acknowledge --yes
+$alternate_project|engine plugin sync
+$alternate_project|engine plugin list --json
+$alternate_project|engine plugin select aidlc flow
+$alternate_project|engine plugin sync
+$alternate_project|engine gen runners
+$alternate_project|engine gen runner-scopes
+$alternate_project|engine plugin list --json
 $caller_dir|doctor --project-dir $alternate_project --quiet" "alternate active space preserves config then doctor order"
 assert_contains "$(cat "$alternate_project/aidlc/spaces/alternate/memory/team.md")" "commit SHA" "team memory is merged into the configured active space"
 assert_contains "$(cat "$alternate_project/aidlc/spaces/alternate/memory/phases/construction.md")" "RED" "construction memory is merged into the configured active space"
