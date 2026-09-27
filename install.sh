@@ -61,6 +61,7 @@ validate_existing_destination() {
 
 validate_existing_destination
 
+require_plugin_toolchain
 mkdir -p "$data_home"
 lock_path="$data_home/.aidlc-flow-install.lock"
 lock_owned=false
@@ -132,7 +133,6 @@ else
 fi
 
 validate_existing_destination
-require_plugin_toolchain
 mkdir -p "$bin_home"
 
 staging=$(mktemp -d "$data_home/.aidlc-flow.new.XXXXXX") || {

@@ -9,6 +9,21 @@ trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 [ -f "$root/lib/aidlc-plugin-tools.sh" ] || fail "plugin toolchain helper exists"
 . "$root/lib/aidlc-plugin-tools.sh"
 
+make_fake_aidlc_runtime() {
+  fixture_home=$1
+  fixture_version=$2
+  fixture_tools="$fixture_home/runtime/claude/.claude/tools"
+  mkdir -p "$fixture_tools"
+  : >"$fixture_tools/aidlc-plugin-validate.ts"
+  : >"$fixture_tools/aidlc-plugin-build.ts"
+  cat >"$fixture_home/aidlc" <<SH
+#!/bin/sh
+[ "\${1:-}" = --version ] && [ "\$#" -eq 1 ] || exit 64
+printf '%s\n' '$fixture_version'
+SH
+  chmod +x "$fixture_home/aidlc"
+}
+
 require_plugin_toolchain
 validate_flow_plugin "$root/plugins/flow"
 build_flow_projection codex "$tmp/codex" "$root/plugins/flow"
@@ -114,6 +129,23 @@ done
 
 unsafe_data_home="$tmp/unsafe-data-home"
 mkdir -p "$unsafe_data_home/aidlc"
+for unsupported_active_version in 2.8.0 3.0.0; do
+  unsupported_home="$unsafe_data_home/aidlc/versions/$unsupported_active_version"
+  make_fake_aidlc_runtime "$unsupported_home" \
+    "aidlc $unsupported_active_version (runtime $unsupported_active_version)"
+  printf '%s\n' "$unsupported_active_version" >"$unsafe_data_home/aidlc/active-version"
+  set +e
+  unsupported_active_output=$(unset AIDLC_FLOW_AIDLC_HOME; \
+    XDG_DATA_HOME="$unsafe_data_home" require_plugin_toolchain 2>&1)
+  unsupported_active_status=$?
+  set -e
+  [ "$unsupported_active_status" -ne 0 ] ||
+    fail "active AI-DLC $unsupported_active_version is rejected"
+  assert_contains "$unsupported_active_output" \
+    "AI-DLC active version must be 2.9.0; found: $unsupported_active_version" \
+    "unsupported active version reports the selected version"
+done
+
 printf '../2.9.0\n' >"$unsafe_data_home/aidlc/active-version"
 set +e
 unsafe_version_output=$(unset AIDLC_FLOW_AIDLC_HOME; XDG_DATA_HOME="$unsafe_data_home" \
@@ -142,6 +174,65 @@ set -e
 [ "$relative_home_status" -ne 0 ] || fail "relative AI-DLC home is rejected"
 assert_contains "$relative_home_output" "must be an absolute path" \
   "relative AI-DLC home reports a clear error"
+
+for invalid_report in \
+  'aidlc 2.8.0 (runtime 2.8.0)' \
+  'aidlc 3.0.0 (runtime 3.0.0)' \
+  'prefix aidlc 2.9.0 (runtime 2.9.0)' \
+  'aidlc 2.9.0 (runtime 2.9.0) suffix'
+do
+  invalid_report_home="$tmp/invalid-report-$(printf '%s' "$invalid_report" | cksum | awk '{ print $1 }')"
+  make_fake_aidlc_runtime "$invalid_report_home" "$invalid_report"
+  set +e
+  invalid_report_output=$(AIDLC_FLOW_AIDLC_HOME="$invalid_report_home" \
+    require_plugin_toolchain 2>&1)
+  invalid_report_status=$?
+  set -e
+  [ "$invalid_report_status" -ne 0 ] ||
+    fail "override runtime version report is exact: $invalid_report"
+  assert_contains "$invalid_report_output" \
+    "selected AI-DLC runtime must report exactly aidlc 2.9.0 (runtime 2.9.0)" \
+    "invalid override runtime report explains the exact contract"
+done
+
+unsafe_executable_home="$tmp/unsafe-executable-home"
+make_fake_aidlc_runtime "$unsafe_executable_home" \
+  'aidlc 2.9.0 (runtime 2.9.0)'
+rm "$unsafe_executable_home/aidlc"
+set +e
+missing_executable_output=$(AIDLC_FLOW_AIDLC_HOME="$unsafe_executable_home" \
+  require_plugin_toolchain 2>&1)
+missing_executable_status=$?
+set -e
+[ "$missing_executable_status" -ne 0 ] || fail "missing selected runtime executable is rejected"
+assert_contains "$missing_executable_output" "executable is missing or unsafe" \
+  "missing selected runtime executable reports a clear error"
+
+make_fake_aidlc_runtime "$unsafe_executable_home" \
+  'aidlc 2.9.0 (runtime 2.9.0)'
+chmod -x "$unsafe_executable_home/aidlc"
+set +e
+non_executable_output=$(AIDLC_FLOW_AIDLC_HOME="$unsafe_executable_home" \
+  require_plugin_toolchain 2>&1)
+non_executable_status=$?
+set -e
+[ "$non_executable_status" -ne 0 ] || fail "non-executable selected runtime is rejected"
+assert_contains "$non_executable_output" "executable is missing or unsafe" \
+  "non-executable selected runtime reports a clear error"
+
+real_selected_executable="$tmp/real-selected-aidlc"
+cp "$unsafe_executable_home/aidlc" "$real_selected_executable"
+chmod +x "$real_selected_executable"
+rm "$unsafe_executable_home/aidlc"
+ln -s "$real_selected_executable" "$unsafe_executable_home/aidlc"
+set +e
+symlink_executable_output=$(AIDLC_FLOW_AIDLC_HOME="$unsafe_executable_home" \
+  require_plugin_toolchain 2>&1)
+symlink_executable_status=$?
+set -e
+[ "$symlink_executable_status" -ne 0 ] || fail "symlinked selected runtime executable is rejected"
+assert_contains "$symlink_executable_output" "executable is missing or unsafe" \
+  "symlinked selected runtime executable reports a clear error"
 
 override_symlink_home="$tmp/override-symlink-home"
 override_real_runtime="$tmp/override-real-runtime"

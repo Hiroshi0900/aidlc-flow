@@ -11,6 +11,12 @@ fake_tools="$fake_aidlc_home/runtime/claude/.claude/tools"
 mkdir -p "$fake_tools"
 : >"$fake_tools/aidlc-plugin-validate.ts"
 : >"$fake_tools/aidlc-plugin-build.ts"
+cat >"$fake_aidlc_home/aidlc" <<'SH'
+#!/bin/sh
+[ "${1:-}" = --version ] && [ "$#" -eq 1 ] || exit 64
+printf '%s\n' 'aidlc 2.9.0 (runtime 2.9.0)'
+SH
+chmod +x "$fake_aidlc_home/aidlc"
 fake_bun="$tmp/fake-bun"
 cat >"$fake_bun" <<'SH'
 #!/bin/sh
@@ -61,6 +67,48 @@ assert_eq "$(cat "$tmp/share/aidlc-flow/plugin-dist/codex/fake-projection")" cod
   "Codex projection is installed"
 assert_eq "$(cat "$tmp/share/aidlc-flow/plugin-dist/claude/fake-projection")" claude \
   "Claude projection is installed"
+
+mixed_runtime_home="$tmp/mixed-runtime"
+mixed_runtime_tools="$mixed_runtime_home/runtime/claude/.claude/tools"
+mkdir -p "$mixed_runtime_tools" "$tmp/path-aidlc"
+: >"$mixed_runtime_tools/aidlc-plugin-validate.ts"
+: >"$mixed_runtime_tools/aidlc-plugin-build.ts"
+cat >"$mixed_runtime_home/aidlc" <<'SH'
+#!/bin/sh
+[ "${1:-}" = --version ] && [ "$#" -eq 1 ] || exit 64
+printf '%s\n' 'aidlc 2.8.0 (runtime 2.8.0)'
+SH
+cat >"$tmp/path-aidlc/aidlc" <<'SH'
+#!/bin/sh
+[ "${1:-}" = --version ] && [ "$#" -eq 1 ] || exit 64
+printf '%s\n' 'aidlc 2.9.0 (runtime 2.9.0)'
+SH
+chmod +x "$mixed_runtime_home/aidlc" "$tmp/path-aidlc/aidlc"
+mixed_state_before=$(find "$tmp/share/aidlc-flow" -type f -exec cksum {} \; | sort)
+mixed_command_before=$(readlink "$tmp/bin/aidlc-flow")
+set +e
+mixed_runtime_output=$(PATH="$tmp/path-aidlc:$PATH" \
+  AIDLC_FLOW_DATA_HOME="$tmp/share" AIDLC_FLOW_BIN_HOME="$tmp/bin" \
+  AIDLC_FLOW_BUN="$fake_bun" AIDLC_FLOW_AIDLC_HOME="$mixed_runtime_home" \
+  /bin/sh "$root/install.sh" 2>&1)
+mixed_runtime_status=$?
+set -e
+[ "$mixed_runtime_status" -ne 0 ] ||
+  fail "selected runtime mismatch is rejected even when PATH aidlc is 2.9.0"
+assert_contains "$mixed_runtime_output" \
+  "selected AI-DLC runtime must report exactly aidlc 2.9.0 (runtime 2.9.0)" \
+  "mixed runtime rejection identifies the selected runtime contract"
+mixed_state_after=$(find "$tmp/share/aidlc-flow" -type f -exec cksum {} \; | sort)
+assert_eq "$mixed_state_after" "$mixed_state_before" \
+  "runtime version rejection preserves the existing install tree"
+assert_eq "$(readlink "$tmp/bin/aidlc-flow")" "$mixed_command_before" \
+  "runtime version rejection preserves the command link"
+[ ! -e "$tmp/share/.aidlc-flow-install.lock" ] ||
+  fail "runtime version rejection leaves no install lock"
+mixed_temporary_leaks=$(find "$tmp/share" -maxdepth 1 -type d \
+  \( -name '.aidlc-flow.new.*' -o -name '.aidlc-flow.backup.*' \) -print)
+[ -z "$mixed_temporary_leaks" ] ||
+  fail "runtime version rejection creates no staging or backup directories"
 
 set +e
 output=$("$command_path" 2>&1)

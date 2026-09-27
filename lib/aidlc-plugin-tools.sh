@@ -1,20 +1,18 @@
 #!/bin/sh
 
+aidlc_flow_required_version=2.9.0
+aidlc_flow_required_version_report="aidlc $aidlc_flow_required_version (runtime $aidlc_flow_required_version)"
+
 plugin_toolchain_die() {
   printf 'aidlc-flow: %s\n' "$*" >&2
   return 1
 }
 
 require_aidlc_plugin_version() {
-  aidlc_flow_required_version=2.9.0
   aidlc_flow_reported_version=$(aidlc --version 2>/dev/null) ||
-    plugin_toolchain_die "unable to read AI-DLC version" || return
-  case "$aidlc_flow_reported_version" in
-    "aidlc $aidlc_flow_required_version (runtime $aidlc_flow_required_version)"*) ;;
-    *)
-      plugin_toolchain_die "AI-DLC $aidlc_flow_required_version is required; found: $aidlc_flow_reported_version" || return
-      ;;
-  esac
+    plugin_toolchain_die "unable to read PATH AI-DLC version" || return
+  [ "$aidlc_flow_reported_version" = "$aidlc_flow_required_version_report" ] ||
+    plugin_toolchain_die "PATH AI-DLC must report exactly $aidlc_flow_required_version_report; found: $aidlc_flow_reported_version" || return
 }
 
 require_plugin_toolchain() {
@@ -50,13 +48,25 @@ require_plugin_toolchain() {
         plugin_toolchain_die "unsafe AI-DLC active version: $aidlc_flow_active_version" || return
         ;;
     esac
+    [ "$aidlc_flow_active_version" = "$aidlc_flow_required_version" ] ||
+      plugin_toolchain_die "AI-DLC active version must be $aidlc_flow_required_version; found: $aidlc_flow_active_version" || return
     aidlc_flow_aidlc_home="$aidlc_flow_data_root/aidlc/versions/$aidlc_flow_active_version"
   fi
 
   # The trust boundary begins at the selected version home. HOME/XDG ancestors
   # may legitimately be symlinks, but the version runtime itself must not be.
+  [ -d "$aidlc_flow_aidlc_home" ] && [ ! -L "$aidlc_flow_aidlc_home" ] ||
+    plugin_toolchain_die "AI-DLC runtime path is missing or unsafe: $aidlc_flow_aidlc_home" || return
+  aidlc_flow_selected_aidlc="$aidlc_flow_aidlc_home/aidlc"
+  [ -f "$aidlc_flow_selected_aidlc" ] && [ ! -L "$aidlc_flow_selected_aidlc" ] &&
+    [ -x "$aidlc_flow_selected_aidlc" ] ||
+    plugin_toolchain_die "selected AI-DLC runtime executable is missing or unsafe: $aidlc_flow_selected_aidlc" || return
+  aidlc_flow_selected_version=$("$aidlc_flow_selected_aidlc" --version 2>/dev/null) ||
+    plugin_toolchain_die "unable to read selected AI-DLC runtime version: $aidlc_flow_selected_aidlc" || return
+  [ "$aidlc_flow_selected_version" = "$aidlc_flow_required_version_report" ] ||
+    plugin_toolchain_die "selected AI-DLC runtime must report exactly $aidlc_flow_required_version_report; found: $aidlc_flow_selected_version" || return
+
   for aidlc_flow_runtime_path in \
-    "$aidlc_flow_aidlc_home" \
     "$aidlc_flow_aidlc_home/runtime" \
     "$aidlc_flow_aidlc_home/runtime/claude" \
     "$aidlc_flow_aidlc_home/runtime/claude/.claude"
