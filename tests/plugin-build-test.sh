@@ -9,19 +9,37 @@ trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 [ -f "$root/lib/aidlc-plugin-tools.sh" ] || fail "plugin toolchain helper exists"
 . "$root/lib/aidlc-plugin-tools.sh"
 
+make_fake_aidlc_responder() {
+  fixture_home=$1
+  fixture_version=$2
+  fixture_shape=${3:-line}
+  mkdir -p "$fixture_home"
+  case "$fixture_shape" in
+    line) fixture_print="printf '%s\\n' '$fixture_version'" ;;
+    trailing-empty) fixture_print="printf '%s\\n\\n' '$fixture_version'" ;;
+    leading-empty) fixture_print="printf '\\n%s\\n' '$fixture_version'" ;;
+    multiple) fixture_print="printf '%s\\n%s\\n' '$fixture_version' extra" ;;
+    no-newline) fixture_print="printf '%s' '$fixture_version'" ;;
+    nul) fixture_print="printf '%s\\000\\n' '$fixture_version'" ;;
+    *) fail "unknown fake AI-DLC version shape: $fixture_shape" ;;
+  esac
+  cat >"$fixture_home/aidlc" <<SH
+#!/bin/sh
+[ "\${1:-}" = --version ] && [ "\$#" -eq 1 ] || exit 64
+$fixture_print
+SH
+  chmod +x "$fixture_home/aidlc"
+}
+
 make_fake_aidlc_runtime() {
   fixture_home=$1
   fixture_version=$2
+  fixture_shape=${3:-line}
   fixture_tools="$fixture_home/runtime/claude/.claude/tools"
   mkdir -p "$fixture_tools"
   : >"$fixture_tools/aidlc-plugin-validate.ts"
   : >"$fixture_tools/aidlc-plugin-build.ts"
-  cat >"$fixture_home/aidlc" <<SH
-#!/bin/sh
-[ "\${1:-}" = --version ] && [ "\$#" -eq 1 ] || exit 64
-printf '%s\n' '$fixture_version'
-SH
-  chmod +x "$fixture_home/aidlc"
+  make_fake_aidlc_responder "$fixture_home" "$fixture_version" "$fixture_shape"
 }
 
 require_plugin_toolchain
@@ -195,6 +213,22 @@ do
     "invalid override runtime report explains the exact contract"
 done
 
+for invalid_shape in trailing-empty leading-empty multiple no-newline nul; do
+  invalid_shape_home="$tmp/invalid-shape-$invalid_shape"
+  make_fake_aidlc_runtime "$invalid_shape_home" \
+    'aidlc 2.9.0 (runtime 2.9.0)' "$invalid_shape"
+  set +e
+  invalid_shape_output=$(AIDLC_FLOW_AIDLC_HOME="$invalid_shape_home" \
+    require_plugin_toolchain 2>&1)
+  invalid_shape_status=$?
+  set -e
+  [ "$invalid_shape_status" -ne 0 ] ||
+    fail "selected runtime rejects malformed version output shape: $invalid_shape"
+  assert_contains "$invalid_shape_output" \
+    "selected AI-DLC runtime must report exactly aidlc 2.9.0 (runtime 2.9.0)" \
+    "malformed selected runtime version output explains the exact contract"
+done
+
 unsafe_executable_home="$tmp/unsafe-executable-home"
 make_fake_aidlc_runtime "$unsafe_executable_home" \
   'aidlc 2.9.0 (runtime 2.9.0)'
@@ -236,8 +270,9 @@ assert_contains "$symlink_executable_output" "executable is missing or unsafe" \
 
 override_symlink_home="$tmp/override-symlink-home"
 override_real_runtime="$tmp/override-real-runtime"
-mkdir -p "$override_symlink_home" \
-  "$override_real_runtime/claude/.claude/tools"
+make_fake_aidlc_responder "$override_symlink_home" \
+  'aidlc 2.9.0 (runtime 2.9.0)'
+mkdir -p "$override_real_runtime/claude/.claude/tools"
 : >"$override_real_runtime/claude/.claude/tools/aidlc-plugin-validate.ts"
 : >"$override_real_runtime/claude/.claude/tools/aidlc-plugin-build.ts"
 ln -s "$override_real_runtime" "$override_symlink_home/runtime"
@@ -247,7 +282,8 @@ override_symlink_output=$(AIDLC_FLOW_AIDLC_HOME="$override_symlink_home" \
 override_symlink_status=$?
 set -e
 [ "$override_symlink_status" -ne 0 ] || fail "override runtime symlink is rejected"
-assert_contains "$override_symlink_output" "missing or unsafe" \
-  "override runtime symlink reports a clear error"
+assert_contains "$override_symlink_output" \
+  "AI-DLC runtime path is missing or unsafe: $override_symlink_home/runtime" \
+  "override runtime symlink reaches the runtime-path guard"
 
 printf 'PASS: plugin-build-test\n'

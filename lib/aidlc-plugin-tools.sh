@@ -8,11 +8,44 @@ plugin_toolchain_die() {
   return 1
 }
 
+require_exact_aidlc_version() (
+  aidlc_flow_version_command=$1
+  aidlc_flow_version_subject=$2
+  aidlc_flow_version_tmp_parent=${TMPDIR:-/tmp}
+  umask 077
+  aidlc_flow_version_tmp=$(mktemp -d \
+    "$aidlc_flow_version_tmp_parent/aidlc-flow-version.XXXXXX" 2>/dev/null) || {
+    plugin_toolchain_die \
+      "unable to create temporary state for $aidlc_flow_version_subject version validation"
+    return 1
+  }
+  aidlc_flow_version_output="$aidlc_flow_version_tmp/output"
+  cleanup_aidlc_flow_version() {
+    rm -f "$aidlc_flow_version_output"
+    rmdir "$aidlc_flow_version_tmp" 2>/dev/null
+  }
+  trap cleanup_aidlc_flow_version 0
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  if "$aidlc_flow_version_command" --version >"$aidlc_flow_version_output" 2>/dev/null; then
+    :
+  else
+    plugin_toolchain_die "unable to read $aidlc_flow_version_subject version"
+    return 1
+  fi
+  if printf '%s\n' "$aidlc_flow_required_version_report" |
+    cmp -s - "$aidlc_flow_version_output"
+  then
+    return 0
+  fi
+  plugin_toolchain_die \
+    "$aidlc_flow_version_subject must report exactly $aidlc_flow_required_version_report"
+)
+
 require_aidlc_plugin_version() {
-  aidlc_flow_reported_version=$(aidlc --version 2>/dev/null) ||
-    plugin_toolchain_die "unable to read PATH AI-DLC version" || return
-  [ "$aidlc_flow_reported_version" = "$aidlc_flow_required_version_report" ] ||
-    plugin_toolchain_die "PATH AI-DLC must report exactly $aidlc_flow_required_version_report; found: $aidlc_flow_reported_version" || return
+  require_exact_aidlc_version aidlc "PATH AI-DLC"
 }
 
 require_plugin_toolchain() {
@@ -61,10 +94,8 @@ require_plugin_toolchain() {
   [ -f "$aidlc_flow_selected_aidlc" ] && [ ! -L "$aidlc_flow_selected_aidlc" ] &&
     [ -x "$aidlc_flow_selected_aidlc" ] ||
     plugin_toolchain_die "selected AI-DLC runtime executable is missing or unsafe: $aidlc_flow_selected_aidlc" || return
-  aidlc_flow_selected_version=$("$aidlc_flow_selected_aidlc" --version 2>/dev/null) ||
-    plugin_toolchain_die "unable to read selected AI-DLC runtime version: $aidlc_flow_selected_aidlc" || return
-  [ "$aidlc_flow_selected_version" = "$aidlc_flow_required_version_report" ] ||
-    plugin_toolchain_die "selected AI-DLC runtime must report exactly $aidlc_flow_required_version_report; found: $aidlc_flow_selected_version" || return
+  require_exact_aidlc_version "$aidlc_flow_selected_aidlc" \
+    "selected AI-DLC runtime" || return
 
   for aidlc_flow_runtime_path in \
     "$aidlc_flow_aidlc_home/runtime" \

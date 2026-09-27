@@ -18,7 +18,14 @@ require_git_repo() {
 }
 
 require_aidlc() {
-  command -v aidlc >/dev/null 2>&1 || die 1 "aidlc is not installed; install it from https://github.com/awslabs/aidlc-workflows/releases/latest"
+  aidlc_flow_aidlc_command=$(command -v aidlc 2>/dev/null) ||
+    die 1 "aidlc is not installed; install it from https://github.com/awslabs/aidlc-workflows/releases/latest"
+  case "$aidlc_flow_aidlc_command" in
+    */*)
+      [ -x "$aidlc_flow_aidlc_command" ] ||
+        die 1 "aidlc is not installed; install it from https://github.com/awslabs/aidlc-workflows/releases/latest"
+      ;;
+  esac
 }
 
 active_space() {
